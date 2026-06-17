@@ -1,0 +1,1144 @@
+// VoxelWorld.cpp
+
+#include "VoxelWorld.h"
+#include "VoxelGenLayers.h"
+#include "Chunk.h"
+#include "Engine/Texture2D.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "TextureResource.h"
+
+// ---------------------------------------------------------------------------
+//  Default block definitions (used when the designer hasn't set any in-editor)
+// ---------------------------------------------------------------------------
+const FBlockDefinition AVoxelWorld::DefaultDefinition = {};
+
+AVoxelWorld::AVoxelWorld()
+{
+	PrimaryActorTick.bCanEverTick = true;
+}
+
+// ---------------------------------------------------------------------------
+//  BeginPlay – seed default definitions and do an initial streaming update
+// ---------------------------------------------------------------------------
+void AVoxelWorld::BeginPlay()
+{
+	Super::BeginPlay();
+	EnsureDefaultDefinitions();
+	BuildTextureAtlas();   // pack individual textures → runtime atlas before any chunks spawn
+
+	// Initialize layer definitions for layered worlds
+	if (WorldGenType == EWorldGenType::Layers)
+	{
+		FVoxelGenLayers::InitializeLayerDefinitions(LayerDefinitions);
+		UE_LOG(LogTemp, Warning, TEXT("VoxelWorld: Initialized %d layers for Layers mode"), LayerDefinitions.Num());
+	}
+
+	if (WorldGenType == EWorldGenType::Flat)
+	{
+		LoadFlatWorld();
+	}
+	else
+	{
+		// Pre-load chunks around the world origin immediately so the player
+		// has solid ground to land on when they are teleported in BeginPlay.
+		// Without this, the first streaming pass doesn't fire until
+		// VOXEL_STREAM_INTERVAL seconds into Tick, which is too late.
+		UE_LOG(LogTemp, Warning, TEXT("VoxelWorld: Calling UpdateStreamingPosition at FVector::ZeroVector"));
+		UpdateStreamingPosition(FVector::ZeroVector);
+	}
+}
+
+void AVoxelWorld::EnsureDefaultDefinitions()
+{
+	// Rebuild the map from scratch every BeginPlay so that hot-reload / Live
+	// Coding patches don't leave stale USTRUCT layout data in the TMap.
+	// Designer overrides can be set via a child Blueprint's BeginPlay AFTER
+	// calling Super::BeginPlay(), which runs this function first.
+	BlockDefinitions.Empty();
+
+	auto AddBlock = [&](EBlockType Type, FLinearColor Color,
+	                    FString TexTop, FString TexSide, FString TexBottom,
+	                    bool bOpaque = true, bool bSolid = true)
+	{
+		if (!BlockDefinitions.Contains(Type))
+		{
+			FBlockDefinition Def;
+			Def.Color         = Color;
+			Def.bIsOpaque     = bOpaque;
+			Def.bIsSolid      = bSolid;
+			Def.TextureTop    = MoveTemp(TexTop);
+			Def.TextureSide   = MoveTemp(TexSide);
+			Def.TextureBottom = MoveTemp(TexBottom);
+			BlockDefinitions.Add(Type, MoveTemp(Def));
+		}
+	};
+
+	// Air has no texture
+	if (!BlockDefinitions.Contains(EBlockType::Air))
+	{
+		FBlockDefinition Air;
+		Air.Color     = FLinearColor(0.f, 0.f, 0.f, 0.f);
+		Air.bIsOpaque = false;
+		Air.bIsSolid  = false;
+		BlockDefinitions.Add(EBlockType::Air, Air);
+	}
+
+	// Default texture name convention: add matching PNGs with these keys to BlockTextures.
+	//  Block                   Color (fallback)                         Top                   Side                  Bottom                  Opaque  Solid
+	AddBlock(EBlockType::Grass,         FLinearColor(0.29f,0.56f,0.16f),        TEXT("grass_top"),      TEXT("grass_side"),     TEXT("dirt"));
+	AddBlock(EBlockType::Dirt,          FLinearColor(0.42f,0.27f,0.13f),        TEXT("dirt"),           TEXT("dirt"),           TEXT("dirt"));
+	AddBlock(EBlockType::Stone,         FLinearColor(0.50f,0.50f,0.50f),        TEXT("stone"),          TEXT("stone"),          TEXT("stone"));
+	AddBlock(EBlockType::Sand,          FLinearColor(0.87f,0.80f,0.55f),        TEXT("sand"),           TEXT("sand"),           TEXT("sand"));
+	AddBlock(EBlockType::Gravel,        FLinearColor(0.45f,0.42f,0.38f),        TEXT("gravel"),         TEXT("gravel"),         TEXT("gravel"));
+	AddBlock(EBlockType::Water,         FLinearColor(0.10f,0.30f,0.80f,0.50f),  TEXT("water"),          TEXT("water"),          TEXT("water"),          false, false);
+	AddBlock(EBlockType::Lava,          FLinearColor(0.90f,0.35f,0.05f,0.80f),  TEXT("lava"),           TEXT("lava"),           TEXT("lava"),           false, false);
+	AddBlock(EBlockType::Bedrock,       FLinearColor(0.15f,0.15f,0.15f),        TEXT("bedrock"),        TEXT("bedrock"),        TEXT("bedrock"));
+	// Oak  (oaklog_end = top/bottom cap face, oaklog_side = bark)
+	AddBlock(EBlockType::OakLog,        FLinearColor(0.40f,0.27f,0.12f),        TEXT("oaklog_end"),     TEXT("oaklog_side"),    TEXT("oaklog_end"));
+	AddBlock(EBlockType::OakLeaves,     FLinearColor(0.15f,0.45f,0.10f),        TEXT(""),               TEXT(""),               TEXT(""),               false, false);  // no texture yet
+	AddBlock(EBlockType::OakPlanks,     FLinearColor(0.60f,0.45f,0.25f),        TEXT("oakplanks"),      TEXT("oakplanks"),      TEXT("oakplanks"));
+	// Birch  (no textures on disk yet – will render with fallback colour)
+	AddBlock(EBlockType::BirchLog,      FLinearColor(0.80f,0.75f,0.60f),        TEXT(""),               TEXT(""),               TEXT(""));
+	AddBlock(EBlockType::BirchLeaves,   FLinearColor(0.40f,0.65f,0.30f),        TEXT(""),               TEXT(""),               TEXT(""),               false, false);
+	AddBlock(EBlockType::BirchPlanks,   FLinearColor(0.80f,0.72f,0.50f),        TEXT(""),               TEXT(""),               TEXT(""));
+	// Spruse  (no textures on disk yet – will render with fallback colour)
+	AddBlock(EBlockType::SpruseLog,     FLinearColor(0.30f,0.18f,0.08f),        TEXT(""),               TEXT(""),               TEXT(""));
+	AddBlock(EBlockType::SpruseLeaves,  FLinearColor(0.08f,0.28f,0.08f),        TEXT(""),               TEXT(""),               TEXT(""),              false, false);
+	AddBlock(EBlockType::SprusePlanks,  FLinearColor(0.50f,0.32f,0.15f),        TEXT(""),               TEXT(""),               TEXT(""));
+	// Decorative / structural
+	AddBlock(EBlockType::Cobblestone,   FLinearColor(0.45f,0.45f,0.45f),        TEXT("cobblestone"),    TEXT("cobblestone"),    TEXT("cobblestone"));
+	AddBlock(EBlockType::Glass,         FLinearColor(0.70f,0.85f,0.95f,0.30f),  TEXT("glass"),          TEXT("glass"),          TEXT("glass"),          false, true);
+	// Ores – keys match the actual .uasset filenames on disk
+	AddBlock(EBlockType::CoalOre,       FLinearColor(0.32f,0.32f,0.32f),        TEXT("coalore"),        TEXT("coalore"),        TEXT("coalore"));
+	AddBlock(EBlockType::CopperOre,     FLinearColor(0.50f,0.36f,0.28f),        TEXT(""),               TEXT(""),               TEXT(""));               // no texture yet
+	AddBlock(EBlockType::IronOre,       FLinearColor(0.52f,0.42f,0.38f),        TEXT(""),               TEXT(""),               TEXT(""));               // no texture yet
+	AddBlock(EBlockType::SilverOre,     FLinearColor(0.70f,0.70f,0.72f),        TEXT("silverore"),      TEXT("silverore"),      TEXT("silverore"));
+	AddBlock(EBlockType::GoldOre,       FLinearColor(0.55f,0.50f,0.22f),        TEXT("goldore"),        TEXT("goldore"),        TEXT("goldore"));
+	AddBlock(EBlockType::PlatinumOre,   FLinearColor(0.65f,0.68f,0.72f),        TEXT("platinumore"),    TEXT("platinumore"),    TEXT("platinumore"));
+	// Gem ores
+	AddBlock(EBlockType::JadeOre,       FLinearColor(0.36f,0.55f,0.38f),        TEXT("jade"),           TEXT("jade"),           TEXT("jade"));
+	AddBlock(EBlockType::RubyOre,       FLinearColor(0.58f,0.30f,0.30f),        TEXT("rubyore"),        TEXT("rubyore"),        TEXT("rubyore"));
+	AddBlock(EBlockType::EmeraldOre,    FLinearColor(0.28f,0.58f,0.30f),        TEXT(""),               TEXT(""),               TEXT(""));               // no texture yet
+	AddBlock(EBlockType::SapphireOre,   FLinearColor(0.28f,0.32f,0.65f),        TEXT(""),               TEXT(""),               TEXT(""));               // no texture yet
+	AddBlock(EBlockType::DiamondOre,    FLinearColor(0.38f,0.58f,0.72f),        TEXT("diamondore"),     TEXT("diamondore"),     TEXT("diamondore"));
+	AddBlock(EBlockType::MythrilOre,    FLinearColor(0.32f,0.62f,0.70f),        TEXT("mythrilore"),     TEXT("mythrilore"),     TEXT("mythrilore"));
+}
+
+// ---------------------------------------------------------------------------
+//  Tick – stream chunks every VOXEL_STREAM_INTERVAL seconds
+// ---------------------------------------------------------------------------
+void AVoxelWorld::Tick(float DeltaTime)
+{
+	Super::Tick(DeltaTime);
+
+	// Flat worlds are fully loaded at BeginPlay – no streaming needed.
+	if (WorldGenType == EWorldGenType::Flat) return;
+
+	StreamingTimer += DeltaTime;
+	if (StreamingTimer < VOXEL_STREAM_INTERVAL) return;
+	StreamingTimer = 0.f;
+
+	// Find the local player pawn
+	if (APlayerController* PC = GetWorld()->GetFirstPlayerController())
+	{
+		if (APawn* Pawn = PC->GetPawn())
+		{
+			UpdateStreamingPosition(Pawn->GetActorLocation());
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+//  Coordinate helpers
+// ---------------------------------------------------------------------------
+
+FIntVector AVoxelWorld::WorldVoxelToChunkCoord(FIntVector WV)
+{
+	// Integer floor division (handles negatives correctly)
+	auto FloorDiv = [](int32 A, int32 B) -> int32
+	{
+		return A / B - (A % B != 0 && (A ^ B) < 0 ? 1 : 0);
+	};
+	return FIntVector(
+		FloorDiv(WV.X, CHUNK_SIZE_X),
+		FloorDiv(WV.Y, CHUNK_SIZE_Y),
+		FloorDiv(WV.Z, CHUNK_SIZE_Z)
+	);
+}
+
+FIntVector AVoxelWorld::WorldVoxelToLocalVoxel(FIntVector WV)
+{
+	FIntVector CC = WorldVoxelToChunkCoord(WV);
+	return FIntVector(
+		WV.X - CC.X * CHUNK_SIZE_X,
+		WV.Y - CC.Y * CHUNK_SIZE_Y,
+		WV.Z - CC.Z * CHUNK_SIZE_Z
+	);
+}
+
+FIntVector AVoxelWorld::WorldPosToChunkCoord(FVector WorldPos)
+{
+	// Convert UE units → voxel coordinates, then to chunk coordinates
+	FIntVector WV(
+		FMath::FloorToInt(WorldPos.X / BLOCK_SIZE),
+		FMath::FloorToInt(WorldPos.Y / BLOCK_SIZE),
+		FMath::FloorToInt(WorldPos.Z / BLOCK_SIZE)
+	);
+	return WorldVoxelToChunkCoord(WV);
+}
+
+// ---------------------------------------------------------------------------
+//  Block API
+// ---------------------------------------------------------------------------
+
+EBlockType AVoxelWorld::GetBlockAt(FIntVector WorldVoxelPos) const
+{
+	FIntVector CC = WorldVoxelToChunkCoord(WorldVoxelPos);
+	const TObjectPtr<AChunk>* Found = LoadedChunks.Find(CC);
+	if (!Found || !(*Found)) return EBlockType::Air;
+
+	FIntVector LV = WorldVoxelToLocalVoxel(WorldVoxelPos);
+	return (*Found)->GetBlock(LV.X, LV.Y, LV.Z);
+}
+
+void AVoxelWorld::SetBlockAt(FIntVector WorldVoxelPos, EBlockType Type)
+{
+	FIntVector CC = WorldVoxelToChunkCoord(WorldVoxelPos);
+	TObjectPtr<AChunk>* Found = LoadedChunks.Find(CC);
+	if (!Found || !(*Found)) return;
+
+	FIntVector LV    = WorldVoxelToLocalVoxel(WorldVoxelPos);
+	AChunk*    Chunk = Found->Get();
+	Chunk->SetBlock(LV.X, LV.Y, LV.Z, Type, /*bRebuildMesh=*/true);
+
+	// Rebuild neighbor chunks if the modified block sits on a boundary
+	auto RebuildNeighbor = [&](FIntVector NeighborCoord)
+	{
+		TObjectPtr<AChunk>* N = LoadedChunks.Find(NeighborCoord);
+		if (N && *N) (*N)->RebuildMesh();
+	};
+
+	if (LV.X == 0)               RebuildNeighbor(CC + FIntVector(-1, 0, 0));
+	if (LV.X == CHUNK_SIZE_X - 1) RebuildNeighbor(CC + FIntVector( 1, 0, 0));
+	if (LV.Y == 0)               RebuildNeighbor(CC + FIntVector( 0,-1, 0));
+	if (LV.Y == CHUNK_SIZE_Y - 1) RebuildNeighbor(CC + FIntVector( 0, 1, 0));
+	if (LV.Z == 0)               RebuildNeighbor(CC + FIntVector( 0, 0,-1));
+	if (LV.Z == CHUNK_SIZE_Z - 1) RebuildNeighbor(CC + FIntVector( 0, 0, 1));
+}
+
+const FBlockDefinition& AVoxelWorld::GetBlockDefinition(EBlockType Type) const
+{
+	const FBlockDefinition* Def = BlockDefinitions.Find(Type);
+	return Def ? *Def : DefaultDefinition;
+}
+
+int32 AVoxelWorld::GetTileIndex(const FString& TextureName) const
+{
+	if (TextureName.IsEmpty()) return 0;
+	const int32* Found = TextureToTileIndex.Find(TextureName);
+	return Found ? *Found : 0;
+}
+
+// ---------------------------------------------------------------------------
+//  Runtime atlas builder
+// ---------------------------------------------------------------------------
+
+void AVoxelWorld::BuildTextureAtlas()
+{
+	// ----------------------------------------------------------------
+	//  1. Collect every unique texture name referenced by block defs.
+	// ----------------------------------------------------------------
+	TArray<FString> UniqueNames;
+	for (const auto& Pair : BlockDefinitions)
+	{
+		const FBlockDefinition& Def = Pair.Value;
+		if (!Def.TextureTop.IsEmpty())    UniqueNames.AddUnique(Def.TextureTop);
+		if (!Def.TextureSide.IsEmpty())   UniqueNames.AddUnique(Def.TextureSide);
+		if (!Def.TextureBottom.IsEmpty()) UniqueNames.AddUnique(Def.TextureBottom);
+	}
+	UniqueNames.Sort();  // stable ordering so tile indices don't shift between runs
+
+	// ----------------------------------------------------------------
+	//  2. Build the tile index map.
+	// ----------------------------------------------------------------
+	TextureToTileIndex.Empty();
+	for (int32 i = 0; i < UniqueNames.Num(); ++i)
+	{
+		TextureToTileIndex.Add(UniqueNames[i], i);
+	}
+
+	// ----------------------------------------------------------------
+	//  2b. Auto-load any texture key not already in BlockTextures.
+	// ----------------------------------------------------------------
+	if (!TextureBasePath.IsEmpty())
+	{
+		for (const FString& Name : UniqueNames)
+		{
+			if (BlockTextures.Contains(Name)) continue;  // manual override wins
+
+			// UE asset path: /Game/Textures/Blocks/grass_top.grass_top
+			const FString AssetPath = FString::Printf(TEXT("%s%s.%s"),
+			                                          *TextureBasePath, *Name, *Name);
+			UTexture2D* Loaded = LoadObject<UTexture2D>(nullptr, *AssetPath);
+			if (Loaded)
+			{
+				BlockTextures.Add(Name, Loaded);
+				UE_LOG(LogTemp, Log, TEXT("VoxelWorld: Auto-loaded texture '%s'"), *AssetPath);
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning, TEXT("VoxelWorld: Could not auto-load '%s' – file missing or wrong path."), *AssetPath);
+			}
+		}
+	}
+
+	if (UniqueNames.IsEmpty())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("VoxelWorld: No block textures registered – atlas not built."));
+		return;
+	}
+
+	// ----------------------------------------------------------------
+	//  2c. NOTE on source texture settings:
+	//      We intentionally do NOT modify CompressionSettings, MipGenSettings,
+	//      or Filter on source textures at runtime.  In the editor those are
+	//      import properties – touching them triggers the async texture
+	//      compiler and causes a fatal "Registering a texture from inside a
+	//      postcompilation" error.
+	//      Source textures must be imported with CPU-readable compression
+	//      (TC_EditorIcon / UserInterface2D) in the editor before play.
+	//      If a texture's BulkData.Lock() returns null below we log a warning.
+	// ----------------------------------------------------------------
+
+	// ----------------------------------------------------------------
+	//  3. Determine atlas grid dimensions (as square as possible).
+	// ----------------------------------------------------------------
+	static constexpr int32 TilePx = 16;   // each tile is 16×16 pixels
+
+	const int32 NumTiles  = UniqueNames.Num();
+	ComputedAtlasCols     = FMath::Max(1, FMath::CeilToInt(FMath::Sqrt((float)NumTiles)));
+	const int32 AtlasRows = FMath::CeilToInt((float)NumTiles / (float)ComputedAtlasCols);
+	const int32 AtlasW    = ComputedAtlasCols * TilePx;
+	const int32 AtlasH    = AtlasRows         * TilePx;
+
+	// ----------------------------------------------------------------
+	//  4. Create a transient BGRA8 atlas texture.
+	// ----------------------------------------------------------------
+	RuntimeAtlas = UTexture2D::CreateTransient(AtlasW, AtlasH, PF_B8G8R8A8, TEXT("VoxelAtlas"));
+	if (!RuntimeAtlas)
+	{
+		UE_LOG(LogTemp, Error, TEXT("VoxelWorld: Failed to create runtime atlas texture."));
+		return;
+	}
+	RuntimeAtlas->Filter         = TF_Nearest;   // pixel-art look, no blurring between tiles
+	RuntimeAtlas->AddressX       = TA_Clamp;
+	RuntimeAtlas->AddressY       = TA_Clamp;
+	RuntimeAtlas->SRGB           = true;
+	// Do NOT set CompressionSettings here. Assigning it on any UTexture2D in the
+	// editor marks the texture dirty and registers it with FTextureCompilingManager.
+	// If this runs inside (or triggered by) a source-texture post-compilation
+	// callback, UE fatally asserts. CreateTransient already produces an
+	// uncompressed BGRA8 texture – no DXT pass is needed or desired.
+
+	FTexture2DMipMap& AtlasMip = RuntimeAtlas->GetPlatformData()->Mips[0];
+	uint8* AtlasData = static_cast<uint8*>(AtlasMip.BulkData.Lock(LOCK_READ_WRITE));
+	if (!AtlasData)
+	{
+		UE_LOG(LogTemp, Error, TEXT("VoxelWorld: Failed to lock atlas mip buffer – aborting atlas build."));
+		AtlasMip.BulkData.Unlock();
+		return;
+	}
+	FMemory::Memset(AtlasData, 0xFF, AtlasW * AtlasH * 4);  // default white (visible if a slot is unfilled)
+
+	// ----------------------------------------------------------------
+	//  5. Copy each source texture into its slot.
+	// ----------------------------------------------------------------
+	for (const FString& Name : UniqueNames)
+	{
+		const TObjectPtr<UTexture2D>* FoundPtr = BlockTextures.Find(Name);
+		if (!FoundPtr || !(*FoundPtr))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("VoxelWorld: Texture '%s' is referenced but not in BlockTextures map."), *Name);
+			continue;
+		}
+
+		UTexture2D* SrcTex = FoundPtr->Get();
+		if (!SrcTex->GetPlatformData() || SrcTex->GetPlatformData()->Mips.IsEmpty())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("VoxelWorld: Texture '%s' has no accessible mip data. "
+			       "Set its Compression to 'VectorDisplacementmap' or 'UserInterface2D' and re-import."), *Name);
+			continue;
+		}
+
+		const int32 TileIdx = TextureToTileIndex[Name];
+		const int32 TileCol = TileIdx % ComputedAtlasCols;
+		const int32 TileRow = TileIdx / ComputedAtlasCols;
+
+		bool bTileCopied = false;
+
+#if WITH_EDITORONLY_DATA
+		// ----------------------------------------------------------------
+		//  Editor / PIE path: read from the texture's Source art.
+		//  This is the original uncompressed pixel data stored inside the
+		//  .uasset file.  It is always CPU-resident in the editor regardless
+		//  of compression settings, streaming state, or how many times PIE
+		//  has been entered.  This is the correct path for atlas building in
+		//  the editor and avoids all the PlatformData / BulkData eviction
+		//  issues that make the atlas go white on the second play session.
+		// ----------------------------------------------------------------
+		if (SrcTex->Source.IsValid())
+		{
+			TArray64<uint8> SrcRaw;
+			SrcTex->Source.GetMipData(SrcRaw, 0);
+
+			const ETextureSourceFormat SourceFmt = SrcTex->Source.GetFormat();
+			const int32 SrcW = SrcTex->Source.GetSizeX();
+			const int32 SrcH = SrcTex->Source.GetSizeY();
+
+			// Diagnostic: log format and first pixel bytes so mismatched formats are easy to spot.
+			if (SrcRaw.Num() >= 8)
+			{
+				UE_LOG(LogTemp, Warning,
+					TEXT("VoxelWorld: Texture '%s'  fmt=%d  size=%dx%d  rawBytes=%d  px0=[%02X %02X %02X %02X %02X %02X %02X %02X]"),
+					*Name, (int32)SourceFmt, SrcW, SrcH, SrcRaw.Num(),
+					SrcRaw[0], SrcRaw[1], SrcRaw[2], SrcRaw[3],
+					SrcRaw[4], SrcRaw[5], SrcRaw[6], SrcRaw[7]);
+			}
+
+			// TSF_G8:    grayscale 8-bit – 1 byte per pixel (e.g. stone, cobblestone).
+			//             Expanded to opaque BGRA by replicating the grey value.
+			// TSF_BGRA8:  standard 8-bit BGRA – most PNG imports.
+			// TSF_RGBA16: 16-bit per-channel RGBA little-endian – some higher-quality
+			//             imports. Downsampled to 8-bit by taking the high byte of each channel.
+			if (SourceFmt == TSF_G8 && SrcRaw.Num() > 0)
+			{
+				for (int32 py = 0; py < TilePx; ++py)
+				{
+					for (int32 px = 0; px < TilePx; ++px)
+					{
+						const int32 SrcX   = (px * SrcW) / TilePx;
+						const int32 SrcY   = (py * SrcH) / TilePx;
+						const int32 SrcIdx = SrcY * SrcW + SrcX;  // 1 byte per pixel
+
+						const int32 DstX   = TileCol * TilePx + px;
+						const int32 DstY   = TileRow * TilePx + py;
+						const int32 DstIdx = (DstY * AtlasW + DstX) * 4;
+
+						const uint8 Gray = SrcRaw[SrcIdx];
+						AtlasData[DstIdx + 0] = Gray;  // B
+						AtlasData[DstIdx + 1] = Gray;  // G
+						AtlasData[DstIdx + 2] = Gray;  // R
+						AtlasData[DstIdx + 3] = 255;   // A
+					}
+				}
+				bTileCopied = true;
+			}
+			else if (SourceFmt == TSF_BGRA8 && SrcRaw.Num() > 0)
+			{
+				for (int32 py = 0; py < TilePx; ++py)
+				{
+					for (int32 px = 0; px < TilePx; ++px)
+					{
+						const int32 SrcX   = (px * SrcW) / TilePx;
+						const int32 SrcY   = (py * SrcH) / TilePx;
+						const int32 SrcIdx = (SrcY * SrcW + SrcX) * 4;  // 4 bytes per pixel
+
+						const int32 DstX   = TileCol * TilePx + px;
+						const int32 DstY   = TileRow * TilePx + py;
+						const int32 DstIdx = (DstY * AtlasW + DstX) * 4;
+
+						// BGRA8 source → BGRA8 atlas: direct copy
+						AtlasData[DstIdx + 0] = SrcRaw[SrcIdx + 0];  // B
+						AtlasData[DstIdx + 1] = SrcRaw[SrcIdx + 1];  // G
+						AtlasData[DstIdx + 2] = SrcRaw[SrcIdx + 2];  // R
+						AtlasData[DstIdx + 3] = SrcRaw[SrcIdx + 3];  // A
+					}
+				}
+				bTileCopied = true;
+			}
+			else if (SourceFmt == TSF_RGBA16 && SrcRaw.Num() > 0)
+			{
+				// 8 bytes per pixel: R0R1 G0G1 B0B1 A0A1 (little-endian, so [+1] = high byte)
+				for (int32 py = 0; py < TilePx; ++py)
+				{
+					for (int32 px = 0; px < TilePx; ++px)
+					{
+						const int32 SrcX   = (px * SrcW) / TilePx;
+						const int32 SrcY   = (py * SrcH) / TilePx;
+						const int32 SrcIdx = (SrcY * SrcW + SrcX) * 8;  // 8 bytes per pixel
+
+						const int32 DstX   = TileCol * TilePx + px;
+						const int32 DstY   = TileRow * TilePx + py;
+						const int32 DstIdx = (DstY * AtlasW + DstX) * 4;
+
+						// RGBA16 (LE) → BGRA8: take high byte of each channel, swap R↔B
+						AtlasData[DstIdx + 0] = SrcRaw[SrcIdx + 5];  // B ← high byte of src B (LE offset +5)
+						AtlasData[DstIdx + 1] = SrcRaw[SrcIdx + 3];  // G ← high byte of src G (LE offset +3)
+						AtlasData[DstIdx + 2] = SrcRaw[SrcIdx + 1];  // R ← high byte of src R (LE offset +1)
+						AtlasData[DstIdx + 3] = SrcRaw[SrcIdx + 7];  // A ← high byte of src A (LE offset +7)
+					}
+				}
+				bTileCopied = true;
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning,
+					TEXT("VoxelWorld: Texture '%s' has unsupported source format %d – tile will appear white. Expected TSF_G8 (%d), TSF_BGRA8 (%d), or TSF_RGBA16 (%d)."),
+					*Name, (int32)SourceFmt, (int32)TSF_G8, (int32)TSF_BGRA8, (int32)TSF_RGBA16);
+			}
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("VoxelWorld: Texture '%s' has no Source art – tile will appear white. Re-import the texture."), *Name);
+		}
+#endif  // WITH_EDITORONLY_DATA
+
+		// ----------------------------------------------------------------
+		//  Packaged / runtime fallback: PlatformData BulkData path.
+		//  Only reached when Source art is unavailable (cooked builds).
+		//  Requires the texture to be imported as UserInterface2D / BGRA8.
+		// ----------------------------------------------------------------
+		if (!bTileCopied)
+		{
+			if (SrcTex->GetPlatformData() && !SrcTex->GetPlatformData()->Mips.IsEmpty())
+			{
+				FTexture2DMipMap& SrcMip = SrcTex->GetPlatformData()->Mips[0];
+				if (!SrcMip.BulkData.IsBulkDataLoaded())
+				{
+					SrcMip.BulkData.ForceBulkDataResident();
+				}
+
+				const uint8* SrcData = static_cast<const uint8*>(SrcMip.BulkData.Lock(LOCK_READ_ONLY));
+				if (SrcData)
+				{
+					const int32 SrcW = SrcTex->GetSizeX();
+					const int32 SrcH = SrcTex->GetSizeY();
+
+					for (int32 py = 0; py < TilePx; ++py)
+					{
+						for (int32 px = 0; px < TilePx; ++px)
+						{
+							const int32 SrcX   = (px * SrcW) / TilePx;
+							const int32 SrcY   = (py * SrcH) / TilePx;
+							const int32 SrcIdx = (SrcY * SrcW + SrcX) * 4;
+
+							const int32 DstX   = TileCol * TilePx + px;
+							const int32 DstY   = TileRow * TilePx + py;
+							const int32 DstIdx = (DstY * AtlasW + DstX) * 4;
+
+							AtlasData[DstIdx + 0] = SrcData[SrcIdx + 0];  // B
+							AtlasData[DstIdx + 1] = SrcData[SrcIdx + 1];  // G
+							AtlasData[DstIdx + 2] = SrcData[SrcIdx + 2];  // R
+							AtlasData[DstIdx + 3] = SrcData[SrcIdx + 3];  // A
+						}
+					}
+				}
+				else
+				{
+					UE_LOG(LogTemp, Warning,
+						TEXT("VoxelWorld: Could not lock PlatformData mip for '%s' – tile will appear white."), *Name);
+				}
+				SrcMip.BulkData.Unlock();
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning,
+					TEXT("VoxelWorld: No PlatformData mips for '%s' – tile will appear white."), *Name);
+			}
+		}
+	}
+
+	AtlasMip.BulkData.Unlock();
+	RuntimeAtlas->UpdateResource();
+
+	UE_LOG(LogTemp, Log, TEXT("VoxelWorld: Built %d×%d atlas (%d tiles) from %d unique textures."),
+		AtlasW, AtlasH, NumTiles, NumTiles);
+	// ----------------------------------------------------------------
+	//  DIAGNOSTIC: confirm atlas state before any chunk spawns.
+	// ----------------------------------------------------------------
+	UE_LOG(LogTemp, Warning,
+		TEXT("[AtlasDiag] ComputedAtlasCols=%d  TileU=%.4f  TileV=%.4f  TileIndexMap entries=%d"),
+		ComputedAtlasCols,
+		1.f / FMath::Max(1.f, (float)ComputedAtlasCols),
+		1.f / FMath::Max(1.f, FMath::CeilToFloat((float)NumTiles / FMath::Max(1.f, (float)ComputedAtlasCols))),
+		TextureToTileIndex.Num());
+	// Dump the first 8 tile→index entries so we can confirm keys match block defs.
+	{
+		int32 DumpCount = 0;
+		for (const auto& KV : TextureToTileIndex)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[AtlasDiag]  tile[%d] = '%s'"), KV.Value, *KV.Key);
+			if (++DumpCount >= 8) break;
+		}
+	}
+	// ----------------------------------------------------------------
+	//  6. Create a dynamic material instance and bind the atlas.
+	// ----------------------------------------------------------------
+	if (ChunkMaterial)
+	{
+		RuntimeChunkMaterial = UMaterialInstanceDynamic::Create(ChunkMaterial, this);
+		RuntimeChunkMaterial->SetTextureParameterValue(TEXT("AtlasTexture"), RuntimeAtlas);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("VoxelWorld: ChunkMaterial is not set – atlas was built but cannot be bound to a material."));
+	}
+}
+
+// ---------------------------------------------------------------------------
+//  Streaming
+// ---------------------------------------------------------------------------
+
+void AVoxelWorld::UpdateStreamingPosition(FVector WorldPosition)
+{
+	FIntVector PlayerChunk = WorldPosToChunkCoord(WorldPosition);
+	UE_LOG(LogTemp, Warning, TEXT("UpdateStreamingPosition: WorldPosition=(%.1f, %.1f, %.1f) → PlayerChunk=(%d,%d,%d)"), 
+		WorldPosition.X, WorldPosition.Y, WorldPosition.Z, PlayerChunk.X, PlayerChunk.Y, PlayerChunk.Z);
+
+	if (WorldGenType == EWorldGenType::Layers)
+	{
+		// For layered worlds: stream both XY and Z (vertical layers)
+		// PlayerChunk.Z is already computed; use it as-is
+		
+		// Check if player has moved to a new layer (vertical position changed significantly)
+		bool bLayerChanged = (PlayerChunk.Z != LastPlayerLayerZ);
+		bool bXYChanged = (FIntVector(PlayerChunk.X, PlayerChunk.Y, 0) != 
+		                  FIntVector(LastPlayerChunkCoord.X, LastPlayerChunkCoord.Y, 0));
+		
+		UE_LOG(LogTemp, Warning, TEXT("  Layers mode: bXYChanged=%d, bLayerChanged=%d, LastPlayerChunk=(%d,%d,%d), LastLayerZ=%d"), 
+			bXYChanged, bLayerChanged, LastPlayerChunkCoord.X, LastPlayerChunkCoord.Y, LastPlayerChunkCoord.Z, LastPlayerLayerZ);
+		
+		if (!bXYChanged && !bLayerChanged) 
+		{
+			UE_LOG(LogTemp, Warning, TEXT("  → No change, returning early"));
+			return;
+		}
+		
+		LastPlayerChunkCoord = PlayerChunk;
+		LastPlayerLayerZ = PlayerChunk.Z;
+
+		// Collect desired chunk set: XY + Z streaming
+		TSet<FIntVector> Desired;
+		for (int32 dx = -RenderDistance; dx <= RenderDistance; ++dx)
+		{
+			for (int32 dy = -RenderDistance; dy <= RenderDistance; ++dy)
+			{
+				for (int32 dz = -VerticalStreamDistance; dz <= VerticalStreamDistance; ++dz)
+				{
+					Desired.Add(PlayerChunk + FIntVector(dx, dy, dz));
+				}
+			}
+		}
+
+		// Load newly visible chunks
+		for (const FIntVector& Coord : Desired)
+		{
+			if (!LoadedChunks.Contains(Coord))
+			{
+				LoadChunk(Coord);
+			}
+		}
+
+		// Unload out-of-range chunks (add 2 as hysteresis to avoid churn)
+		TArray<FIntVector> ToUnload;
+		for (const auto& Pair : LoadedChunks)
+		{
+			FIntVector Delta = Pair.Key - PlayerChunk;
+			if (FMath::Abs(Delta.X) > RenderDistance + 2 ||
+				FMath::Abs(Delta.Y) > RenderDistance + 2 ||
+				FMath::Abs(Delta.Z) > VerticalStreamDistance + 2)
+			{
+				ToUnload.Add(Pair.Key);
+			}
+		}
+		for (const FIntVector& Coord : ToUnload)
+		{
+			UnloadChunk(Coord);
+		}
+	}
+	else
+	{
+		// XY-only streaming for Terrain and Flat modes
+		// Force Z=0 (all terrain lives in surface chunks)
+		PlayerChunk.Z = 0;
+
+		if (PlayerChunk == LastPlayerChunkCoord) return;
+		LastPlayerChunkCoord = PlayerChunk;
+
+		// Collect desired chunk set
+		TSet<FIntVector> Desired;
+		for (int32 dx = -RenderDistance; dx <= RenderDistance; ++dx)
+		{
+			for (int32 dy = -RenderDistance; dy <= RenderDistance; ++dy)
+			{
+				Desired.Add(PlayerChunk + FIntVector(dx, dy, 0));
+			}
+		}
+
+		// Load newly visible chunks
+		for (const FIntVector& Coord : Desired)
+		{
+			if (!LoadedChunks.Contains(Coord))
+			{
+				LoadChunk(Coord);
+			}
+		}
+
+		// Unload out-of-range chunks (add 2 as hysteresis to avoid churn)
+		TArray<FIntVector> ToUnload;
+		for (const auto& Pair : LoadedChunks)
+		{
+			FIntVector Delta = Pair.Key - PlayerChunk;
+			if (FMath::Abs(Delta.X) > RenderDistance + 2 ||
+				FMath::Abs(Delta.Y) > RenderDistance + 2)
+			{
+				ToUnload.Add(Pair.Key);
+			}
+		}
+		for (const FIntVector& Coord : ToUnload)
+		{
+			UnloadChunk(Coord);
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+//  Flat world
+// ---------------------------------------------------------------------------
+
+void AVoxelWorld::LoadFlatWorld()
+{
+	if (bFlatLoaded) return;
+	bFlatLoaded = true;
+
+	// Spawn FlatExtentChunks × FlatExtentChunks chunks centered near the origin.
+	// With FlatExtentChunks=4: chunks (0,0) to (3,3) → 64 m × 64 m surface.
+	for (int32 cx = 0; cx < FlatExtentChunks; ++cx)
+	{
+		for (int32 cy = 0; cy < FlatExtentChunks; ++cy)
+		{
+			LoadChunk(FIntVector(cx, cy, 0));
+		}
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("VoxelWorld: Loaded %d×%d flat chunk grid (%d m × %d m)."),
+		FlatExtentChunks, FlatExtentChunks,
+		FlatExtentChunks * CHUNK_SIZE_X,
+		FlatExtentChunks * CHUNK_SIZE_Y);
+}
+
+void AVoxelWorld::GenerateFlatChunkData(FIntVector Coord, TArray<EBlockType>& OutBlocks) const
+{
+	OutBlocks.SetNum(CHUNK_SIZE_X * CHUNK_SIZE_Y * CHUNK_SIZE_Z);
+
+	const int32 GrassZ = FlatSurfaceHeight;      // top surface
+	const int32 DirtMinZ = GrassZ - 3;           // 3 blocks of dirt below grass
+
+	for (int32 X = 0; X < CHUNK_SIZE_X; ++X)
+	{
+		for (int32 Y = 0; Y < CHUNK_SIZE_Y; ++Y)
+		{
+			for (int32 Z = 0; Z < CHUNK_SIZE_Z; ++Z)
+			{
+				EBlockType Type;
+				if      (Z > GrassZ)               Type = EBlockType::Air;
+				else if (Z == GrassZ)              Type = EBlockType::Grass;
+				else if (Z >= DirtMinZ)            Type = EBlockType::Dirt;
+				else                               Type = EBlockType::Stone;
+
+				OutBlocks[X + CHUNK_SIZE_X * (Y + CHUNK_SIZE_Y * Z)] = Type;
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+
+void AVoxelWorld::LoadChunk(FIntVector Coord)
+{
+	UE_LOG(LogTemp, Warning, TEXT("LoadChunk: Loading chunk at (%d,%d,%d)"), Coord.X, Coord.Y, Coord.Z);
+	
+	// Generate block data using the selected generation mode
+	TArray<EBlockType> Blocks;
+	if (WorldGenType == EWorldGenType::Flat)
+	{
+		GenerateFlatChunkData(Coord, Blocks);
+	}
+	else if (WorldGenType == EWorldGenType::Layers)
+	{
+		GenerateLayeredChunkData(Coord, Blocks);
+	}
+	else
+	{
+		GenerateChunkData(Coord, Blocks);
+	}
+
+	// Spawn chunk actor
+	const FVector WorldPos(
+		static_cast<float>(Coord.X) * CHUNK_SIZE_X * BLOCK_SIZE,
+		static_cast<float>(Coord.Y) * CHUNK_SIZE_Y * BLOCK_SIZE,
+		static_cast<float>(Coord.Z) * CHUNK_SIZE_Z * BLOCK_SIZE
+	);
+
+	FActorSpawnParameters Params;
+	Params.Owner = this;
+
+	AChunk* NewChunk = GetWorld()->SpawnActor<AChunk>(AChunk::StaticClass(), WorldPos, FRotator::ZeroRotator, Params);
+	if (!NewChunk) return;
+
+	NewChunk->ChunkCoord       = Coord;
+	NewChunk->VoxelWorld       = this;
+	// Flat worlds and layered worlds need sync collision for proper setup
+	NewChunk->bUseSyncCollision = (WorldGenType == EWorldGenType::Flat || WorldGenType == EWorldGenType::Layers);
+	NewChunk->Initialize(Blocks);
+
+	LoadedChunks.Add(Coord, NewChunk);
+
+	// Ask border neighbors to rebuild so shared-boundary faces are correct
+	const FIntVector Offsets[] = {
+		{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}
+	};
+	for (const FIntVector& Off : Offsets)
+	{
+		TObjectPtr<AChunk>* Neighbor = LoadedChunks.Find(Coord + Off);
+		if (Neighbor && *Neighbor) (*Neighbor)->RebuildMesh();
+	}
+}
+
+void AVoxelWorld::UnloadChunk(FIntVector Coord)
+{
+	TObjectPtr<AChunk>* Found = LoadedChunks.Find(Coord);
+	if (!Found || !(*Found)) return;
+
+	(*Found)->Destroy();
+	LoadedChunks.Remove(Coord);
+}
+
+// ---------------------------------------------------------------------------
+//  Player spawn location
+// ---------------------------------------------------------------------------
+
+FVector AVoxelWorld::GetPlayerSpawnLocation() const
+{
+	if (WorldGenType == EWorldGenType::Flat)
+	{
+		// Center of the flat chunk grid in XY.
+		const float GridHalfX = (FlatExtentChunks * CHUNK_SIZE_X * BLOCK_SIZE) * 0.5f;
+		const float GridHalfY = (FlatExtentChunks * CHUNK_SIZE_Y * BLOCK_SIZE) * 0.5f;
+
+		// Top of the grass block = (SurfaceZ + 1) block-faces up from the chunk origin.
+		const float GrassTopZ  = (FlatSurfaceHeight + 1) * BLOCK_SIZE;
+
+		// Capsule half-height (96) keeps feet at the surface.
+		// Extra 300-unit buffer lets the player fall onto confirmed collision
+		// rather than spawning exactly at the surface edge.
+		const float SpawnZ = GrassTopZ + 96.f + 300.f;
+
+		return FVector(GridHalfX, GridHalfY, SpawnZ);
+	}
+	else if (WorldGenType == EWorldGenType::Layers)
+	{
+		// Layered world: spawn at the surface layer (chunk Z=0), on top of the grass.
+		// Roughly in the middle of the first chunk in XY space.
+		const float SpawnX = CHUNK_SIZE_X * BLOCK_SIZE * 0.5f;
+		const float SpawnY = CHUNK_SIZE_Y * BLOCK_SIZE * 0.5f;
+		
+		// Top of the surface grass block (layer 0 typically has grass on top).
+		// Spawn roughly 2 blocks above the surface for comfortable clearance.
+		const float SpawnZ = (2 + 1) * BLOCK_SIZE + 96.f + 10.f;  // 3 blocks up + capsule + small buffer
+		
+		return FVector(SpawnX, SpawnY, SpawnZ);
+	}
+	else
+	{
+		// Terrain: spawn above the maximum possible surface height at the origin.
+		const float SpawnZ = (50 + 30 + 1) * BLOCK_SIZE + 96.f + 10.f;  // BASE_HEIGHT + HEIGHT_RANGE + 1 block gap
+		return FVector(0.f, 0.f, SpawnZ);
+	}
+}
+
+// ---------------------------------------------------------------------------
+//  Terrain generation
+// ---------------------------------------------------------------------------
+
+// Simple value-noise implementation (no external libraries required).
+
+// ---------------------------------------------------------------------------
+//  Layered world generation
+// ---------------------------------------------------------------------------
+
+void AVoxelWorld::GenerateLayeredChunkData(FIntVector Coord, TArray<EBlockType>& OutBlocks) const
+{
+	// Delegate to the layer generation system
+	FVoxelGenLayers::GenerateLayeredChunkData(Coord, OutBlocks, LayerDefinitions);
+}
+
+// ---------------------------------------------------------------------------
+//  2D Perlin gradient noise (Ken Perlin's improved algorithm, 2002)
+// ---------------------------------------------------------------------------
+
+// Fixed 256-entry permutation table (doubled to 512 to avoid modulo in lookup).
+static const uint8 GPerm[512] =
+{
+	151,160,137, 91, 90, 15,131, 13,201, 95, 96, 53,194,233,  7,225,
+	140, 36,103, 30, 69,142,  8, 99, 37,240, 21, 10, 23,190,  6,148,
+	247,120,234, 75,  0, 26,197, 62, 94,252,219,203,117, 35, 11, 32,
+	 57,177, 33, 88,237,149, 56, 87,174, 20,125,136,171,168, 68,175,
+	 74,165, 71,134,139, 48, 27,166, 77,146,158,231, 83,111,229,122,
+	 60,211,133,230,220,105, 92, 41, 55, 46,245, 40,244,102,143, 54,
+	 65, 25, 63,161,  1,216, 80, 73,209, 76,132,187,208, 89, 18,169,
+	200,196,135,130,116,188,159, 86,164,100,109,198,173,186,  3, 64,
+	 52,217,226,250,124,123,  5,202, 38,147,118,126,255, 82, 85,212,
+	207,206, 59,227, 47, 16, 58, 17,182,189, 28, 42,223,183,170,213,
+	119,248,152,  2, 44,154,163, 70,221,153,101,155,167, 43,172,  9,
+	129, 22, 39,253, 19, 98,108,110, 79,113,224,232,178,185,112,104,
+	218,246, 97,228,251, 34,242,193,238,210,144, 12,191,179,162,241,
+	 81, 51,145,235,249, 14,239,107, 49,192,214, 31,181,199,106,157,
+	184, 84,204,176,115,121, 50, 45,127,  4,150,254,138,236,205, 93,
+	222,114, 67, 29, 24, 72,243,141,128,195, 78, 66,215, 61,156,180,
+	// repeat
+	151,160,137, 91, 90, 15,131, 13,201, 95, 96, 53,194,233,  7,225,
+	140, 36,103, 30, 69,142,  8, 99, 37,240, 21, 10, 23,190,  6,148,
+	247,120,234, 75,  0, 26,197, 62, 94,252,219,203,117, 35, 11, 32,
+	 57,177, 33, 88,237,149, 56, 87,174, 20,125,136,171,168, 68,175,
+	 74,165, 71,134,139, 48, 27,166, 77,146,158,231, 83,111,229,122,
+	 60,211,133,230,220,105, 92, 41, 55, 46,245, 40,244,102,143, 54,
+	 65, 25, 63,161,  1,216, 80, 73,209, 76,132,187,208, 89, 18,169,
+	200,196,135,130,116,188,159, 86,164,100,109,198,173,186,  3, 64,
+	 52,217,226,250,124,123,  5,202, 38,147,118,126,255, 82, 85,212,
+	207,206, 59,227, 47, 16, 58, 17,182,189, 28, 42,223,183,170,213,
+	119,248,152,  2, 44,154,163, 70,221,153,101,155,167, 43,172,  9,
+	129, 22, 39,253, 19, 98,108,110, 79,113,224,232,178,185,112,104,
+	218,246, 97,228,251, 34,242,193,238,210,144, 12,191,179,162,241,
+	 81, 51,145,235,249, 14,239,107, 49,192,214, 31,181,199,106,157,
+	184, 84,204,176,115,121, 50, 45,127,  4,150,254,138,236,205, 93,
+	222,114, 67, 29, 24, 72,243,141,128,195, 78, 66,215, 61,156,180,
+};
+
+// Quintic fade curve: 6t^5 − 15t^4 + 10t^3  (zero first AND second derivative at 0 and 1)
+static FORCEINLINE float PerlinFade(float T)
+{
+	return T * T * T * (T * (T * 6.f - 15.f) + 10.f);
+}
+
+// 2D gradient dot-product using 8 evenly-spaced unit vectors
+static FORCEINLINE float PerlinGrad2(uint8 Hash, float X, float Y)
+{
+	switch (Hash & 7)
+	{
+		case 0: return  X + Y;
+		case 1: return -X + Y;
+		case 2: return  X - Y;
+		case 3: return -X - Y;
+		case 4: return  X;
+		case 5: return -X;
+		case 6: return  Y;
+		case 7: return -Y;
+		default: return 0.f;
+	}
+}
+
+// Single-octave 2D Perlin noise.  Returns roughly −1..1.
+static float Perlin2D(float X, float Y)
+{
+	const int32 IX = FMath::FloorToInt(X) & 255;
+	const int32 IY = FMath::FloorToInt(Y) & 255;
+	const float FX = X - FMath::FloorToInt(X);
+	const float FY = Y - FMath::FloorToInt(Y);
+
+	const float UX = PerlinFade(FX);
+	const float UY = PerlinFade(FY);
+
+	const uint8 A  = GPerm[IX    ] + IY;
+	const uint8 B  = GPerm[IX + 1] + IY;
+
+	return FMath::Lerp(
+		FMath::Lerp(PerlinGrad2(GPerm[A    ], FX,       FY      ),
+		            PerlinGrad2(GPerm[B    ], FX - 1.f, FY      ), UX),
+		FMath::Lerp(PerlinGrad2(GPerm[A + 1], FX,       FY - 1.f),
+		            PerlinGrad2(GPerm[B + 1], FX - 1.f, FY - 1.f), UX),
+		UY
+	);
+}
+
+// Fractal Brownian Motion: sum of Perlin octaves.  Returns 0..1.
+float AVoxelWorld::SampleTerrainHeight(float WX, float WY)
+{
+	float Value = 0.f;
+	float Amp   = 1.f;
+	float Freq  = 1.f / 128.f;   // ~1 hill per 128 blocks at the base octave
+	float Total = 0.f;
+
+	// 5 octaves: large rolling hills down to small surface bumps
+	for (int32 Oct = 0; Oct < 5; ++Oct)
+	{
+		Value += Perlin2D(WX * Freq, WY * Freq) * Amp;
+		Total += Amp;
+		Amp   *= 0.5f;
+		Freq  *= 2.f;
+	}
+
+	// Remap from roughly −1..1 → 0..1
+	return (Value / Total) * 0.5f + 0.5f;
+}
+
+void AVoxelWorld::GenerateChunkData(FIntVector Coord, TArray<EBlockType>& OutBlocks) const
+{
+	OutBlocks.SetNum(CHUNK_SIZE_X * CHUNK_SIZE_Y * CHUNK_SIZE_Z);
+
+	// Terrain parameters
+	static constexpr int32 BASE_HEIGHT  = 50;  // minimum surface Z
+	static constexpr int32 HEIGHT_RANGE = 30;  // maximum extra Z above base
+	static constexpr int32 SOLID_DEPTH  =  5;  // guaranteed solid blocks below surface
+	                                            // (top block = Grass, next 4 = Dirt)
+	static constexpr int32 DIRT_DEPTH   =  4;  // how many of those 5 are Dirt (rest = Stone)
+
+	for (int32 X = 0; X < CHUNK_SIZE_X; ++X)
+	{
+		for (int32 Y = 0; Y < CHUNK_SIZE_Y; ++Y)
+		{
+			const float WX = static_cast<float>(Coord.X * CHUNK_SIZE_X + X);
+			const float WY = static_cast<float>(Coord.Y * CHUNK_SIZE_Y + Y);
+
+			const float Noise    = SampleTerrainHeight(WX, WY);              // 0..1
+			const int32 SurfaceZ = BASE_HEIGHT + FMath::RoundToInt(Noise * static_cast<float>(HEIGHT_RANGE));
+
+			// Solid band boundaries (no air pockets – every Z <= SurfaceZ is filled)
+			const int32 DirtBottomZ = SurfaceZ - DIRT_DEPTH;   // last dirt layer
+
+			for (int32 Z = 0; Z < CHUNK_SIZE_Z; ++Z)
+			{
+				EBlockType Type;
+
+				if (Z > SurfaceZ)
+				{
+					Type = EBlockType::Air;       // above surface → always air
+				}
+				else if (Z == SurfaceZ)
+				{
+					Type = EBlockType::Grass;     // top block
+				}
+				else if (Z >= DirtBottomZ)
+				{
+					Type = EBlockType::Dirt;      // DIRT_DEPTH blocks of dirt
+				}
+				else
+				{
+					Type = EBlockType::Stone;     // everything else solid stone
+				}
+
+				OutBlocks[X + CHUNK_SIZE_X * (Y + CHUNK_SIZE_Y * Z)] = Type;
+			}
+		}
+	}
+
+	// Second pass: place surface objects (boulders, trees, …) on top of the terrain.
+	GenerateSurfaceObjects(Coord, OutBlocks);
+}
+
+// ---------------------------------------------------------------------------
+//  Surface object generation
+// ---------------------------------------------------------------------------
+
+// Deterministic integer hash of a chunk coordinate + salt.
+// Used as a cheap per-chunk seed so object placement is fully reproducible.
+static uint32 VoxelChunkHash(FIntVector Coord, uint32 Salt)
+{
+	uint32 H = (uint32)(Coord.X * 2654435761u)
+	         ^ (uint32)(Coord.Y *  805459861u)
+	         ^ (uint32)(Coord.Z * 1234567891u)
+	         ^ Salt;
+	H ^= H >> 16;
+	H *= 0x45d9f3bu;
+	H ^= H >> 16;
+	return H;
+}
+
+// Returns the highest solid (non-Air) Z in the block array at column (X, Y), or -1.
+static int32 FindSurfaceZ(const TArray<EBlockType>& Blocks, int32 X, int32 Y)
+{
+	for (int32 Z = CHUNK_SIZE_Z - 1; Z >= 0; --Z)
+	{
+		if (Blocks[X + CHUNK_SIZE_X * (Y + CHUNK_SIZE_Y * Z)] != EBlockType::Air)
+			return Z;
+	}
+	return -1;
+}
+
+// Writes a block into the flat array, silently ignoring out-of-bounds positions.
+static void PlaceBlockInArray(TArray<EBlockType>& Blocks, int32 X, int32 Y, int32 Z, EBlockType Type)
+{
+	if (X < 0 || X >= CHUNK_SIZE_X ||
+	    Y < 0 || Y >= CHUNK_SIZE_Y ||
+	    Z < 0 || Z >= CHUNK_SIZE_Z) return;
+	Blocks[X + CHUNK_SIZE_X * (Y + CHUNK_SIZE_Y * Z)] = Type;
+}
+
+void AVoxelWorld::GenerateSurfaceObjects(FIntVector Coord, TArray<EBlockType>& InOutBlocks) const
+{
+	// -----------------------------------------------------------------------
+	//  Boulder pass
+	//
+	//  Roughly 1 boulder per 8 terrain chunks.
+	//  Shape: misshapen ellipsoid of Stone, diameter 3–5 blocks, resting on
+	//  the grass surface with ~30% of the radius embedded so it looks grounded.
+	//
+	//  Add more object types below this block as the game grows.
+	// -----------------------------------------------------------------------
+	{
+		// 1-in-8 spawn chance, seeded by chunk coordinate.
+		if ((VoxelChunkHash(Coord, 0xBEEF1234u) % 8) != 0) return;
+
+		// Pick a centre XY in [4, 11] so the boulder stays fully inside the chunk
+		// even at the maximum radius (2.5 blocks + 1-block pad = 3.5 < 4).
+		const int32 CX = 4 + (int32)(VoxelChunkHash(Coord, 0xDEADBEEFu) % 8);
+		const int32 CY = 4 + (int32)(VoxelChunkHash(Coord, 0xCAFEBABEu) % 8);
+
+		const int32 SurfZ = FindSurfaceZ(InOutBlocks, CX, CY);
+		if (SurfZ < 0) return;  // no solid surface found (shouldn't happen in practice)
+
+		// Base radius in [1.5, 2.5] → diameter 3–5 blocks.
+		const float BaseRadius = 1.5f + (float)(VoxelChunkHash(Coord, 0x12345678u) % 101) * 0.01f;
+
+		// Independent per-axis scale factors (0.80–1.20) produce an irregular ellipsoid.
+		const float ScaleX = 0.80f + (float)(VoxelChunkHash(Coord, 0xAABBCCDDu) % 41) * 0.01f;
+		const float ScaleY = 0.80f + (float)(VoxelChunkHash(Coord, 0x11223344u) % 41) * 0.01f;
+		const float ScaleZ = 0.70f + (float)(VoxelChunkHash(Coord, 0x55667788u) % 41) * 0.01f;
+
+		// Vertical centre: embed 30% of the radius into the ground so it looks
+		// like it's resting on the surface rather than hovering above it.
+		const float CZ = (float)SurfZ + BaseRadius * 0.70f;
+
+		const int32 IRadius = FMath::CeilToInt(BaseRadius) + 1;
+
+		for (int32 dz = -IRadius; dz <= IRadius; ++dz)
+		{
+			for (int32 dy = -IRadius; dy <= IRadius; ++dy)
+			{
+				for (int32 dx = -IRadius; dx <= IRadius; ++dx)
+				{
+					// Normalised ellipsoid distance.
+					const float nx = (float)dx / (BaseRadius * ScaleX);
+					const float ny = (float)dy / (BaseRadius * ScaleY);
+					const float nz = (float)dz / (BaseRadius * ScaleZ);
+
+					// Per-voxel surface perturbation (±10% of normalised radius)
+					// gives a rough, chipped-rock silhouette.
+					const uint32 PH = VoxelChunkHash(
+						FIntVector(CX + dx, CY + dy, SurfZ + dz), 0x99887766u);
+					const float Perturb = (float)(PH % 21) * 0.01f - 0.10f;  // -0.10 .. +0.10
+
+					if ((nx*nx + ny*ny + nz*nz) <= (1.0f + Perturb))
+					{
+						PlaceBlockInArray(InOutBlocks,
+							CX + dx,
+							CY + dy,
+							FMath::RoundToInt(CZ) + dz,
+							EBlockType::Stone);
+					}
+				}
+			}
+		}
+	}
+}
