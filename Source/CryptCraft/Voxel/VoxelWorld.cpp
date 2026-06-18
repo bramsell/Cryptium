@@ -1,7 +1,6 @@
 // VoxelWorld.cpp
 
 #include "VoxelWorld.h"
-#include "VoxelGenLayers.h"
 #include "Chunk.h"
 #include "Engine/Texture2D.h"
 #include "Materials/MaterialInstanceDynamic.h"
@@ -24,14 +23,14 @@ void AVoxelWorld::BeginPlay()
 {
 	Super::BeginPlay();
 	EnsureDefaultDefinitions();
-	BuildTextureAtlas();   // pack individual textures → runtime atlas before any chunks spawn
-
-	// Initialize layer definitions for layered worlds
-	if (WorldGenType == EWorldGenType::Layers)
+	
+	// Auto-load default chunk material if not set
+	if (!ChunkMaterial)
 	{
-		FVoxelGenLayers::InitializeLayerDefinitions(LayerDefinitions);
-		UE_LOG(LogTemp, Warning, TEXT("VoxelWorld: Initialized %d layers for Layers mode"), LayerDefinitions.Num());
+		ChunkMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/Materials/M_VoxelChunk"));
 	}
+	
+	BuildTextureAtlas();   // pack individual textures → runtime atlas before any chunks spawn
 
 	if (WorldGenType == EWorldGenType::Flat)
 	{
@@ -43,7 +42,6 @@ void AVoxelWorld::BeginPlay()
 		// has solid ground to land on when they are teleported in BeginPlay.
 		// Without this, the first streaming pass doesn't fire until
 		// VOXEL_STREAM_INTERVAL seconds into Tick, which is too late.
-		UE_LOG(LogTemp, Warning, TEXT("VoxelWorld: Calling UpdateStreamingPosition at FVector::ZeroVector"));
 		UpdateStreamingPosition(FVector::ZeroVector);
 	}
 }
@@ -596,110 +594,48 @@ void AVoxelWorld::UpdateStreamingPosition(FVector WorldPosition)
 	UE_LOG(LogTemp, Warning, TEXT("UpdateStreamingPosition: WorldPosition=(%.1f, %.1f, %.1f) → PlayerChunk=(%d,%d,%d)"), 
 		WorldPosition.X, WorldPosition.Y, WorldPosition.Z, PlayerChunk.X, PlayerChunk.Y, PlayerChunk.Z);
 
-	if (WorldGenType == EWorldGenType::Layers)
+	if (PlayerChunk == LastPlayerChunkCoord) return;
+	LastPlayerChunkCoord = PlayerChunk;
+
+	// Collect desired chunk set - now includes vertical streaming
+	// Load RenderDistance chunks in XY, and ±3 chunks vertically
+	static constexpr int32 VerticalRenderDistance = 3;
+	TSet<FIntVector> Desired;
+	for (int32 dx = -RenderDistance; dx <= RenderDistance; ++dx)
 	{
-		// For layered worlds: stream both XY and Z (vertical layers)
-		// PlayerChunk.Z is already computed; use it as-is
-		
-		// Check if player has moved to a new layer (vertical position changed significantly)
-		bool bLayerChanged = (PlayerChunk.Z != LastPlayerLayerZ);
-		bool bXYChanged = (FIntVector(PlayerChunk.X, PlayerChunk.Y, 0) != 
-		                  FIntVector(LastPlayerChunkCoord.X, LastPlayerChunkCoord.Y, 0));
-		
-		UE_LOG(LogTemp, Warning, TEXT("  Layers mode: bXYChanged=%d, bLayerChanged=%d, LastPlayerChunk=(%d,%d,%d), LastLayerZ=%d"), 
-			bXYChanged, bLayerChanged, LastPlayerChunkCoord.X, LastPlayerChunkCoord.Y, LastPlayerChunkCoord.Z, LastPlayerLayerZ);
-		
-		if (!bXYChanged && !bLayerChanged) 
+		for (int32 dy = -RenderDistance; dy <= RenderDistance; ++dy)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("  → No change, returning early"));
-			return;
-		}
-		
-		LastPlayerChunkCoord = PlayerChunk;
-		LastPlayerLayerZ = PlayerChunk.Z;
-
-		// Collect desired chunk set: XY + Z streaming
-		TSet<FIntVector> Desired;
-		for (int32 dx = -RenderDistance; dx <= RenderDistance; ++dx)
-		{
-			for (int32 dy = -RenderDistance; dy <= RenderDistance; ++dy)
+			for (int32 dz = -VerticalRenderDistance; dz <= VerticalRenderDistance; ++dz)
 			{
-				for (int32 dz = -VerticalStreamDistance; dz <= VerticalStreamDistance; ++dz)
-				{
-					Desired.Add(PlayerChunk + FIntVector(dx, dy, dz));
-				}
+				Desired.Add(PlayerChunk + FIntVector(dx, dy, dz));
 			}
-		}
-
-		// Load newly visible chunks
-		for (const FIntVector& Coord : Desired)
-		{
-			if (!LoadedChunks.Contains(Coord))
-			{
-				LoadChunk(Coord);
-			}
-		}
-
-		// Unload out-of-range chunks (add 2 as hysteresis to avoid churn)
-		TArray<FIntVector> ToUnload;
-		for (const auto& Pair : LoadedChunks)
-		{
-			FIntVector Delta = Pair.Key - PlayerChunk;
-			if (FMath::Abs(Delta.X) > RenderDistance + 2 ||
-				FMath::Abs(Delta.Y) > RenderDistance + 2 ||
-				FMath::Abs(Delta.Z) > VerticalStreamDistance + 2)
-			{
-				ToUnload.Add(Pair.Key);
-			}
-		}
-		for (const FIntVector& Coord : ToUnload)
-		{
-			UnloadChunk(Coord);
 		}
 	}
-	else
+
+	// Load newly visible chunks
+	for (const FIntVector& Coord : Desired)
 	{
-		// XY-only streaming for Terrain and Flat modes
-		// Force Z=0 (all terrain lives in surface chunks)
-		PlayerChunk.Z = 0;
-
-		if (PlayerChunk == LastPlayerChunkCoord) return;
-		LastPlayerChunkCoord = PlayerChunk;
-
-		// Collect desired chunk set
-		TSet<FIntVector> Desired;
-		for (int32 dx = -RenderDistance; dx <= RenderDistance; ++dx)
+		if (!LoadedChunks.Contains(Coord))
 		{
-			for (int32 dy = -RenderDistance; dy <= RenderDistance; ++dy)
-			{
-				Desired.Add(PlayerChunk + FIntVector(dx, dy, 0));
-			}
+			LoadChunk(Coord);
 		}
+	}
 
-		// Load newly visible chunks
-		for (const FIntVector& Coord : Desired)
+	// Unload out-of-range chunks (add 2 as hysteresis to avoid churn)
+	TArray<FIntVector> ToUnload;
+	for (const auto& Pair : LoadedChunks)
+	{
+		FIntVector Delta = Pair.Key - PlayerChunk;
+		if (FMath::Abs(Delta.X) > RenderDistance + 2 ||
+			FMath::Abs(Delta.Y) > RenderDistance + 2 ||
+			FMath::Abs(Delta.Z) > VerticalRenderDistance + 2)
 		{
-			if (!LoadedChunks.Contains(Coord))
-			{
-				LoadChunk(Coord);
-			}
+			ToUnload.Add(Pair.Key);
 		}
-
-		// Unload out-of-range chunks (add 2 as hysteresis to avoid churn)
-		TArray<FIntVector> ToUnload;
-		for (const auto& Pair : LoadedChunks)
-		{
-			FIntVector Delta = Pair.Key - PlayerChunk;
-			if (FMath::Abs(Delta.X) > RenderDistance + 2 ||
-				FMath::Abs(Delta.Y) > RenderDistance + 2)
-			{
-				ToUnload.Add(Pair.Key);
-			}
-		}
-		for (const FIntVector& Coord : ToUnload)
-		{
-			UnloadChunk(Coord);
-		}
+	}
+	for (const FIntVector& Coord : ToUnload)
+	{
+		UnloadChunk(Coord);
 	}
 }
 
@@ -757,17 +693,11 @@ void AVoxelWorld::GenerateFlatChunkData(FIntVector Coord, TArray<EBlockType>& Ou
 
 void AVoxelWorld::LoadChunk(FIntVector Coord)
 {
-	UE_LOG(LogTemp, Warning, TEXT("LoadChunk: Loading chunk at (%d,%d,%d)"), Coord.X, Coord.Y, Coord.Z);
-	
 	// Generate block data using the selected generation mode
 	TArray<EBlockType> Blocks;
 	if (WorldGenType == EWorldGenType::Flat)
 	{
 		GenerateFlatChunkData(Coord, Blocks);
-	}
-	else if (WorldGenType == EWorldGenType::Layers)
-	{
-		GenerateLayeredChunkData(Coord, Blocks);
 	}
 	else
 	{
@@ -789,8 +719,8 @@ void AVoxelWorld::LoadChunk(FIntVector Coord)
 
 	NewChunk->ChunkCoord       = Coord;
 	NewChunk->VoxelWorld       = this;
-	// Flat worlds and layered worlds need sync collision for proper setup
-	NewChunk->bUseSyncCollision = (WorldGenType == EWorldGenType::Flat || WorldGenType == EWorldGenType::Layers);
+	// Flat worlds need sync collision for proper setup
+	NewChunk->bUseSyncCollision = (WorldGenType == EWorldGenType::Flat);
 	NewChunk->Initialize(Blocks);
 
 	LoadedChunks.Add(Coord, NewChunk);
@@ -837,23 +767,17 @@ FVector AVoxelWorld::GetPlayerSpawnLocation() const
 
 		return FVector(GridHalfX, GridHalfY, SpawnZ);
 	}
-	else if (WorldGenType == EWorldGenType::Layers)
-	{
-		// Layered world: spawn at the surface layer (chunk Z=0), on top of the grass.
-		// Roughly in the middle of the first chunk in XY space.
-		const float SpawnX = CHUNK_SIZE_X * BLOCK_SIZE * 0.5f;
-		const float SpawnY = CHUNK_SIZE_Y * BLOCK_SIZE * 0.5f;
-		
-		// Top of the surface grass block (layer 0 typically has grass on top).
-		// Spawn roughly 2 blocks above the surface for comfortable clearance.
-		const float SpawnZ = (2 + 1) * BLOCK_SIZE + 96.f + 10.f;  // 3 blocks up + capsule + small buffer
-		
-		return FVector(SpawnX, SpawnY, SpawnZ);
-	}
 	else
 	{
-		// Terrain: spawn above the maximum possible surface height at the origin.
-		const float SpawnZ = (50 + 30 + 1) * BLOCK_SIZE + 96.f + 10.f;  // BASE_HEIGHT + HEIGHT_RANGE + 1 block gap
+		// Terrain: Query actual height at origin and spawn just above terrain surface
+		const float TerrainNoise = SampleTerrainHeight(0.f, 0.f);  // Sample at origin
+		const int32 TerrainSurfaceZ = 50 + FMath::RoundToInt(TerrainNoise * 30.f);  // BASE_HEIGHT + HEIGHT_RANGE
+		
+		// Spawn just 2 blocks above the terrain surface (where solid blocks are)
+		// Player's capsule will land on the grass/dirt layer below
+		const int32 SpawnBlockZ = TerrainSurfaceZ + 2;
+		const float SpawnZ = (static_cast<float>(SpawnBlockZ) + 1.f) * BLOCK_SIZE + 96.f;  // +1 for block above surface, +96 for capsule
+		
 		return FVector(0.f, 0.f, SpawnZ);
 	}
 }
@@ -863,16 +787,6 @@ FVector AVoxelWorld::GetPlayerSpawnLocation() const
 // ---------------------------------------------------------------------------
 
 // Simple value-noise implementation (no external libraries required).
-
-// ---------------------------------------------------------------------------
-//  Layered world generation
-// ---------------------------------------------------------------------------
-
-void AVoxelWorld::GenerateLayeredChunkData(FIntVector Coord, TArray<EBlockType>& OutBlocks) const
-{
-	// Delegate to the layer generation system
-	FVoxelGenLayers::GenerateLayeredChunkData(Coord, OutBlocks, LayerDefinitions);
-}
 
 // ---------------------------------------------------------------------------
 //  2D Perlin gradient noise (Ken Perlin's improved algorithm, 2002)
@@ -1009,17 +923,18 @@ void AVoxelWorld::GenerateChunkData(FIntVector Coord, TArray<EBlockType>& OutBlo
 
 			for (int32 Z = 0; Z < CHUNK_SIZE_Z; ++Z)
 			{
+				const int32 WorldZ = Coord.Z * CHUNK_SIZE_Z + Z;  // Convert local Z to world Z
 				EBlockType Type;
 
-				if (Z > SurfaceZ)
+				if (WorldZ > SurfaceZ)
 				{
 					Type = EBlockType::Air;       // above surface → always air
 				}
-				else if (Z == SurfaceZ)
+				else if (WorldZ == SurfaceZ)
 				{
 					Type = EBlockType::Grass;     // top block
 				}
-				else if (Z >= DirtBottomZ)
+				else if (WorldZ >= DirtBottomZ)
 				{
 					Type = EBlockType::Dirt;      // DIRT_DEPTH blocks of dirt
 				}

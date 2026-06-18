@@ -7,7 +7,6 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "VoxelTypes.h"
-#include "VoxelGenLayers.h"
 #include "Engine/Texture2D.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "VoxelWorld.generated.h"
@@ -31,7 +30,7 @@ public:
 
 	/** Controls how the world is generated. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|World")
-	EWorldGenType WorldGenType = EWorldGenType::Layers;
+	EWorldGenType WorldGenType = EWorldGenType::Terrain;
 
 	/**
 	 * How many chunks to load in each direction (X/Y) around the player.
@@ -57,28 +56,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|World", meta = (EditCondition = "WorldGenType == EWorldGenType::Flat", ClampMin = "1"))
 	int32 FlatSurfaceHeight = 8;
 
-	/**
-	 * How many layers deep underground to generate.
-	 * Default 5 = 5 layers below surface (Surface + 4 underground).
-	 * Only used when WorldGenType == Layers.
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Layers", meta = (EditCondition = "WorldGenType == EWorldGenType::Layers", ClampMin = "1"))
-	int32 MaxLayerDepth = 5;
 
-	/**
-	 * How many layers above surface (caverns, etc.). Usually 0 or 1.
-	 * Only used when WorldGenType == Layers.
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Layers", meta = (EditCondition = "WorldGenType == EWorldGenType::Layers", ClampMin = "0"))
-	int32 MaxLayerHeight = 0;
-
-	/**
-	 * How many chunks vertically (above/below) to stream around the player.
-	 * Default 2 = load player's layer ± 2 layers for smooth transitions.
-	 * Only used when WorldGenType == Layers.
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Layers", meta = (EditCondition = "WorldGenType == EWorldGenType::Layers", ClampMin = "1"))
-	int32 VerticalStreamDistance = 2;
 
 	/**
 	 * Material applied to every chunk section.
@@ -173,12 +151,6 @@ private:
 	FIntVector LastPlayerChunkCoord = FIntVector(INT_MAX);
 	float      StreamingTimer       = 0.f;
 
-	/** Track last player layer Z coordinate for vertical streaming (Layers mode only). */
-	int32 LastPlayerLayerZ = INT_MAX;
-
-	/** Layer definitions (initialized at BeginPlay for Layers mode). */
-	TArray<FLayerDefinition> LayerDefinitions;
-
 	// -----------------------------------------------------------------------
 	//  Coordinate helpers
 	// -----------------------------------------------------------------------
@@ -213,9 +185,6 @@ private:
 	 * Add new object types here as the game grows.
 	 */
 	void GenerateSurfaceObjects(FIntVector Coord, TArray<EBlockType>& InOutBlocks) const;
-
-	/** Fill OutBlocks with layered terrain data for ChunkCoord. */
-	void GenerateLayeredChunkData(FIntVector Coord, TArray<EBlockType>& OutBlocks) const;
 
 	/** Simple multi-octave value-noise height function. Returns 0..1. */
 	static float SampleTerrainHeight(float WorldX, float WorldY);
