@@ -14,6 +14,7 @@
 class UImage;
 class UTextBlock;
 class UBorder;
+class UInventoryDragDropOperation;
 
 UCLASS()
 class CRYPTCRAFT_API UInventorySlotWidget : public UUserWidget
@@ -40,7 +41,29 @@ public:
     UPROPERTY(BlueprintReadWrite, Category = "Inventory|UI")
     int32 SlotIndex = 0;
 
+    /** Whether this slot is in the hotbar (true) or main grid (false). */
+    UPROPERTY(BlueprintReadWrite, Category = "Inventory|UI")
+    bool bIsHotbarSlot = false;
+
+    /** Reference to the inventory component for drag-drop operations. */
+    UPROPERTY(BlueprintReadWrite, Category = "Inventory|UI")
+    TObjectPtr<UInventoryComponent> InventoryComponent;
+
+    /** Restore item visibility (used after drag ends). */
+    UFUNCTION(BlueprintCallable, Category = "Inventory|UI")
+    void RestoreItemVisibility();
+
 protected:
+    // -----------------------------------------------------------------------
+    //  UUserWidget overrides for drag-drop
+    // -----------------------------------------------------------------------
+
+    virtual FReply NativeOnMouseButtonDown(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent) override;
+    virtual void NativeOnDragDetected(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent, UDragDropOperation*& OutOperation) override;
+    virtual bool NativeOnDragOver(const FGeometry& InGeometry, const FDragDropEvent& InDragDropEvent, UDragDropOperation* InOperation) override;
+    virtual bool NativeOnDrop(const FGeometry& InGeometry, const FDragDropEvent& InDragDropEvent, UDragDropOperation* InOperation) override;
+    virtual void NativeOnDragCancelled(const FDragDropEvent& InDragDropEvent, UDragDropOperation* InOperation) override;
+
     // -----------------------------------------------------------------------
     //  Bound widgets  (BindWidgetOptional → no compile error if absent in BP,
     //  but the feature simply won't render)
@@ -60,4 +83,9 @@ protected:
      */
     UPROPERTY(meta = (BindWidgetOptional))
     TObjectPtr<UBorder> SelectionBorder;
+
+private:
+    /** Cache of the current slot data for drag operations. */
+    FInventorySlot CachedSlotData;
+    FItemData* CachedItemData = nullptr;
 };

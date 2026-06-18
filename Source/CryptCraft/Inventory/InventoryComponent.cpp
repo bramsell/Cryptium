@@ -46,10 +46,39 @@ int32 UInventoryComponent::AddItem(FName ItemID, int32 Count)
         MaxStack = FMath::Max(1, Data->MaxStackSize);
     }
 
-    // Fill existing partial stacks in grid then hotbar, then empty slots.
     int32 Remaining = Count;
+
+    // Pass 1: Search BOTH hotbar and grid for existing partial stacks.
+    // Check hotbar first (maintains priority), then grid.
+    for (FInventorySlot& Slot : Hotbar)
+    {
+        if (Remaining <= 0) break;
+        if (Slot.ItemID == ItemID && Slot.StackCount > 0 && Slot.StackCount < MaxStack)
+        {
+            const int32 Room = MaxStack - Slot.StackCount;
+            const int32 Transfer = FMath::Min(Room, Remaining);
+            Slot.StackCount += Transfer;
+            Remaining -= Transfer;
+        }
+    }
+
+    for (FInventorySlot& Slot : MainGrid)
+    {
+        if (Remaining <= 0) break;
+        if (Slot.ItemID == ItemID && Slot.StackCount > 0 && Slot.StackCount < MaxStack)
+        {
+            const int32 Room = MaxStack - Slot.StackCount;
+            const int32 Transfer = FMath::Min(Room, Remaining);
+            Slot.StackCount += Transfer;
+            Remaining -= Transfer;
+        }
+    }
+
+    // Pass 2: Fill empty hotbar slots (prioritize hotbar for new stacks).
+    Remaining = AddToSlotArray(Hotbar, ItemID, Remaining, MaxStack);
+
+    // Pass 3: Fill empty main grid slots.
     Remaining = AddToSlotArray(MainGrid, ItemID, Remaining, MaxStack);
-    Remaining = AddToSlotArray(Hotbar,   ItemID, Remaining, MaxStack);
 
     if (Remaining < Count)
     {
@@ -141,7 +170,7 @@ void UInventoryComponent::SplitStack(bool bFromHotbar, int32 SlotIndex)
 
     const int32 SplitAmount = Src.StackCount / 2;
 
-    // Find the first empty slot (grid first, then hotbar).
+    // Find the first empty slot (hotbar first, then grid).
     auto TryPlace = [&](TArray<FInventorySlot>& Slots) -> bool
     {
         for (FInventorySlot& Slot : Slots)
@@ -158,7 +187,7 @@ void UInventoryComponent::SplitStack(bool bFromHotbar, int32 SlotIndex)
         return false;
     };
 
-    if (!TryPlace(MainGrid)) TryPlace(Hotbar);
+    if (!TryPlace(Hotbar)) TryPlace(MainGrid);
 }
 
 // ---------------------------------------------------------------------------
@@ -221,7 +250,7 @@ bool UInventoryComponent::UnequipToInventory(EEquipmentSlot Slot)
     FInventorySlot& EquipSlot = EquipmentSlots[Slot];
     if (EquipSlot.IsEmpty()) return false;
 
-    // Try grid first, then hotbar.
+    // Try hotbar first, then grid.
     auto TryUnequip = [&](TArray<FInventorySlot>& Slots) -> bool
     {
         for (FInventorySlot& S : Slots)
@@ -238,7 +267,7 @@ bool UInventoryComponent::UnequipToInventory(EEquipmentSlot Slot)
         return false;
     };
 
-    return TryUnequip(MainGrid) || TryUnequip(Hotbar);
+    return TryUnequip(Hotbar) || TryUnequip(MainGrid);
 }
 
 // ---------------------------------------------------------------------------

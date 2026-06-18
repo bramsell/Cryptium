@@ -100,7 +100,7 @@ void UHotbarWidget::BuildSlots()
             BoxSlot->SetVerticalAlignment(VAlign_Fill);
         }
 
-        SlotWidgets.Add(SlotWidget);
+        SlotWidgets.Add(TObjectPtr<UInventorySlotWidget>(SlotWidget));
         ++CreatedCount;
     }
 

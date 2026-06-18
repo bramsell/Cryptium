@@ -20,6 +20,7 @@ public class CryptCraft : ModuleRules
 			"GameplayStateTreeModule",
 			"UMG",
 			"Slate",
+			"SlateCore",
 			"ProceduralMeshComponent"
 		});
 

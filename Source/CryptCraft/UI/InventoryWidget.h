@@ -93,6 +93,8 @@ protected:
 
     virtual void NativeConstruct() override;
     virtual void NativeDestruct()  override;
+    virtual bool NativeOnDragOver(const FGeometry& InGeometry, const FDragDropEvent& InDragDropEvent, UDragDropOperation* InOperation) override;
+    virtual bool NativeOnDrop(const FGeometry& InGeometry, const FDragDropEvent& InDragDropEvent, UDragDropOperation* InOperation) override;
 
 private:
     UPROPERTY()
@@ -107,6 +109,11 @@ private:
 
     UPROPERTY()
     TMap<EEquipmentSlot, TObjectPtr<UInventorySlotWidget>> EquipSlotWidgets;
+
+    // Track which slot is currently being hovered for drop
+    TObjectPtr<UInventorySlotWidget> CurrentHoveredSlot;
+    bool CurrentHoveredIsHotbar = false;
+    int32 CurrentHoveredIndex = -1;
 
     // Build helpers (run once)
     void BuildGridSlots();

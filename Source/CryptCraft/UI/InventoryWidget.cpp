@@ -1,6 +1,7 @@
 #include "UI/InventoryWidget.h"
 
 #include "UI/InventorySlotWidget.h"
+#include "UI/InventoryDragDropOperation.h"
 #include "Components/HorizontalBox.h"
 #include "Components/HorizontalBoxSlot.h"
 #include "Components/UniformGridPanel.h"
@@ -71,6 +72,96 @@ void UInventoryWidget::NativeDestruct()
 }
 
 // ---------------------------------------------------------------------------
+//  Drag-Drop Handling
+// ---------------------------------------------------------------------------
+
+bool UInventoryWidget::NativeOnDragOver(const FGeometry& InGeometry, const FDragDropEvent& InDragDropEvent, UDragDropOperation* InOperation)
+{
+    Super::NativeOnDragOver(InGeometry, InDragDropEvent, InOperation);
+
+    // Get the mouse position in screen space
+    FVector2D MousePos = InDragDropEvent.GetScreenSpacePosition();
+
+    // Check grid slots
+    for (int32 i = 0; i < GridSlotWidgets.Num(); ++i)
+    {
+        if (GridSlotWidgets[i])
+        {
+            FVector2D SlotPos = GridSlotWidgets[i]->GetTickSpaceGeometry().GetAbsolutePosition();
+            FVector2D SlotSize = GridSlotWidgets[i]->GetTickSpaceGeometry().GetLocalSize();
+            FSlateRect SlotRect(SlotPos, SlotSize);
+
+            if (SlotRect.ContainsPoint(MousePos))
+            {
+                CurrentHoveredSlot = GridSlotWidgets[i];
+                CurrentHoveredIsHotbar = false;
+                CurrentHoveredIndex = i;
+                return true;
+            }
+        }
+    }
+
+    // Check hotbar slots
+    for (int32 i = 0; i < HotbarSlotWidgets.Num(); ++i)
+    {
+        if (HotbarSlotWidgets[i])
+        {
+            FVector2D SlotPos = HotbarSlotWidgets[i]->GetTickSpaceGeometry().GetAbsolutePosition();
+            FVector2D SlotSize = HotbarSlotWidgets[i]->GetTickSpaceGeometry().GetLocalSize();
+            FSlateRect SlotRect(SlotPos, SlotSize);
+
+            if (SlotRect.ContainsPoint(MousePos))
+            {
+                CurrentHoveredSlot = HotbarSlotWidgets[i];
+                CurrentHoveredIsHotbar = true;
+                CurrentHoveredIndex = i;
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+bool UInventoryWidget::NativeOnDrop(const FGeometry& InGeometry, const FDragDropEvent& InDragDropEvent, UDragDropOperation* InOperation)
+{
+    Super::NativeOnDrop(InGeometry, InDragDropEvent, InOperation);
+
+    if (!InOperation || !InventoryRef)
+    {
+        return false;
+    }
+
+    UInventoryDragDropOperation* InventoryOp = Cast<UInventoryDragDropOperation>(InOperation);
+    if (!InventoryOp)
+    {
+        return false;
+    }
+
+    // If no valid slot was hovered, reject the drop
+    if (CurrentHoveredIndex < 0)
+    {
+        return false;
+    }
+
+    // Restore visibility of source slot
+    if (InventoryOp->SourceSlotWidget.IsValid())
+    {
+        UInventorySlotWidget* SourceSlot = InventoryOp->SourceSlotWidget.Get();
+        if (SourceSlot)
+        {
+            SourceSlot->RestoreItemVisibility();
+        }
+    }
+
+    // Perform the swap using the hovered slot that NativeOnDragOver tracked
+    InventoryRef->SwapSlots(InventoryOp->bFromHotbar, InventoryOp->FromIndex,
+                             CurrentHoveredIsHotbar, CurrentHoveredIndex);
+
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 //  Init
 // ---------------------------------------------------------------------------
 
@@ -127,6 +218,8 @@ void UInventoryWidget::BuildGridSlots()
         if (!SlotWidget) continue;
 
         SlotWidget->SlotIndex = i;
+        SlotWidget->bIsHotbarSlot = false;
+        SlotWidget->InventoryComponent = InventoryRef;
 
         const int32 Col = i % UInventoryComponent::GridWidth;
         const int32 Row = i / UInventoryComponent::GridWidth;
@@ -174,6 +267,8 @@ void UInventoryWidget::BuildHotbarSlots()
         if (!SlotWidget) continue;
 
         SlotWidget->SlotIndex = i;
+        SlotWidget->bIsHotbarSlot = true;
+        SlotWidget->InventoryComponent = InventoryRef;
 
         if (UHorizontalBoxSlot* BoxSlot = HotbarBox->AddChildToHorizontalBox(SlotWidget))
         {
@@ -225,28 +320,12 @@ void UInventoryWidget::BuildEquipmentSlots()
 
     int32 CreatedCount = 0;
 
-    // Build in display order
+    // Build in display order - only main armor slots
     const TArray<EEquipmentSlot> SlotOrder = {
         EEquipmentSlot::Helmet,
         EEquipmentSlot::Chestplate,
         EEquipmentSlot::Leggings,
         EEquipmentSlot::Boots,
-        EEquipmentSlot::Back,
-        EEquipmentSlot::Wings,
-        EEquipmentSlot::Necklace,
-        EEquipmentSlot::LeftHand,
-        EEquipmentSlot::RightHand,
-        EEquipmentSlot::Charm1,
-        EEquipmentSlot::Charm2,
-        EEquipmentSlot::Charm3,
-        EEquipmentSlot::Ring1,
-        EEquipmentSlot::Ring2,
-        EEquipmentSlot::Ring3,
-        EEquipmentSlot::Ring4,
-        EEquipmentSlot::Ring5,
-        EEquipmentSlot::Ring6,
-        EEquipmentSlot::Ring7,
-        EEquipmentSlot::Ring8,
     };
 
     for (EEquipmentSlot EquipSlot : SlotOrder)
@@ -256,6 +335,8 @@ void UInventoryWidget::BuildEquipmentSlots()
         if (!SlotWidget) continue;
 
         SlotWidget->SlotIndex = static_cast<int32>(EquipSlot);
+        SlotWidget->bIsHotbarSlot = false;
+        SlotWidget->InventoryComponent = InventoryRef;
 
         UVerticalBox* TargetBox = GetEquipmentContainerForSlot(EquipSlot);
         if (!TargetBox)

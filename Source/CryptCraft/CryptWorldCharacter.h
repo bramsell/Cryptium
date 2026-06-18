@@ -110,4 +110,23 @@ private:
 
 	/** Right-click: place a block on the targeted face. */
 	UFUNCTION() void PlaceBlock();
+
+	/** Hotbar slot selection handlers (keys 1-0). */
+	UFUNCTION() void Hotbar_SelectSlot_0();
+	UFUNCTION() void Hotbar_SelectSlot_1();
+	UFUNCTION() void Hotbar_SelectSlot_2();
+	UFUNCTION() void Hotbar_SelectSlot_3();
+	UFUNCTION() void Hotbar_SelectSlot_4();
+	UFUNCTION() void Hotbar_SelectSlot_5();
+	UFUNCTION() void Hotbar_SelectSlot_6();
+	UFUNCTION() void Hotbar_SelectSlot_7();
+	UFUNCTION() void Hotbar_SelectSlot_8();
+	UFUNCTION() void Hotbar_SelectSlot_9();
+
+	/** Hotbar scroll wheel handlers. */
+	UFUNCTION() void Hotbar_ScrollUp();
+	UFUNCTION() void Hotbar_ScrollDown();
+
+	/** Internal helper to change hotbar slot. */
+	void SelectHotbarSlot(int32 SlotIndex);
 };

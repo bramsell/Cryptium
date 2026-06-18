@@ -10,11 +10,13 @@
 #include "Voxel/VoxelWorld.h"
 #include "Inventory/InventoryComponent.h"
 #include "Items/ItemPickup.h"
+#include "Items/ItemData.h"
 #include "UI/HotbarWidget.h"
 #include "UI/InventoryWidget.h"
 #include "Blueprint/UserWidget.h"
 #include "Engine/Engine.h"
 #include "Engine/GameViewportClient.h"
+#include "Engine/DataTable.h"
 #include "GameFramework/PlayerController.h"
 
 ACryptWorldCharacter::ACryptWorldCharacter()
@@ -79,11 +81,33 @@ void ACryptWorldCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 	PlayerInputComponent->BindKey(EKeys::LeftMouseButton,  IE_Pressed, this, &ACryptWorldCharacter::BreakBlock);
 	PlayerInputComponent->BindKey(EKeys::RightMouseButton, IE_Pressed, this, &ACryptWorldCharacter::PlaceBlock);
 	PlayerInputComponent->BindKey(EKeys::E,                IE_Pressed, this, &ACryptWorldCharacter::ToggleInventory);
+
+	// Hotbar slot selection: keys 1-0 map to slots 0-9
+	PlayerInputComponent->BindKey(EKeys::One,   IE_Pressed, this, &ACryptWorldCharacter::Hotbar_SelectSlot_0);
+	PlayerInputComponent->BindKey(EKeys::Two,   IE_Pressed, this, &ACryptWorldCharacter::Hotbar_SelectSlot_1);
+	PlayerInputComponent->BindKey(EKeys::Three, IE_Pressed, this, &ACryptWorldCharacter::Hotbar_SelectSlot_2);
+	PlayerInputComponent->BindKey(EKeys::Four,  IE_Pressed, this, &ACryptWorldCharacter::Hotbar_SelectSlot_3);
+	PlayerInputComponent->BindKey(EKeys::Five,  IE_Pressed, this, &ACryptWorldCharacter::Hotbar_SelectSlot_4);
+	PlayerInputComponent->BindKey(EKeys::Six,   IE_Pressed, this, &ACryptWorldCharacter::Hotbar_SelectSlot_5);
+	PlayerInputComponent->BindKey(EKeys::Seven, IE_Pressed, this, &ACryptWorldCharacter::Hotbar_SelectSlot_6);
+	PlayerInputComponent->BindKey(EKeys::Eight, IE_Pressed, this, &ACryptWorldCharacter::Hotbar_SelectSlot_7);
+	PlayerInputComponent->BindKey(EKeys::Nine,  IE_Pressed, this, &ACryptWorldCharacter::Hotbar_SelectSlot_8);
+	PlayerInputComponent->BindKey(EKeys::Zero,  IE_Pressed, this, &ACryptWorldCharacter::Hotbar_SelectSlot_9);
+
+	// Hotbar scroll wheel
+	PlayerInputComponent->BindKey(EKeys::MouseScrollUp,   IE_Pressed, this, &ACryptWorldCharacter::Hotbar_ScrollUp);
+	PlayerInputComponent->BindKey(EKeys::MouseScrollDown, IE_Pressed, this, &ACryptWorldCharacter::Hotbar_ScrollDown);
 }
 
 void ACryptWorldCharacter::BeginPlay()
 {
 	Super::BeginPlay();
+
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 10.f, FColor::Yellow, TEXT("[CryptWorldCharacter::BeginPlay] *** CHARACTER BEGINPLAY CALLED ***"));
+	}
+	UE_LOG(LogTemp, Warning, TEXT("[CryptWorldCharacter::BeginPlay] *** CHARACTER BEGINPLAY CALLED ***"));
 
 	// Cache the VoxelWorld so interaction methods don't iterate every call.
 	for (TActorIterator<AVoxelWorld> It(GetWorld()); It; ++It)
@@ -104,6 +128,100 @@ void ACryptWorldCharacter::BeginPlay()
 		Cam->SetRelativeLocation(FVector(0.f, 0.f, 60.f));   // ~eye height
 		Cam->SetRelativeRotation(FRotator::ZeroRotator);
 		Cam->bUsePawnControlRotation = true;
+	}
+
+	// Load ItemDataTable dynamically for the inventory system
+	UE_LOG(LogTemp, Log, TEXT("[CryptWorldCharacter::BeginPlay] Starting ItemDataTable setup..."));
+	
+	if (InventoryComponent)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[CryptWorldCharacter::BeginPlay] InventoryComponent found"));
+		
+		UDataTable* ItemTable = InventoryComponent->ItemDataTable;
+		
+		// Load if not already assigned
+		if (!ItemTable)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[CryptWorldCharacter::BeginPlay] ItemDataTable is null, attempting to load..."));
+			const FString ItemTablePath = TEXT("/Game/Data/DT_Items");
+			ItemTable = LoadObject<UDataTable>(nullptr, *ItemTablePath);
+			if (ItemTable)
+			{
+				InventoryComponent->ItemDataTable = ItemTable;
+				UE_LOG(LogTemp, Log, TEXT("[CryptWorldCharacter::BeginPlay] ✓ ItemDataTable loaded: %s"), *ItemTablePath);
+			}
+			else
+			{
+				UE_LOG(LogTemp, Error, TEXT("[CryptWorldCharacter::BeginPlay] ✗ FAILED to load ItemDataTable from: %s"), *ItemTablePath);
+				ItemTable = nullptr;
+			}
+		}
+		else
+		{
+			UE_LOG(LogTemp, Log, TEXT("[CryptWorldCharacter::BeginPlay] ItemDataTable already assigned"));
+		}
+
+		// Populate rows if table exists
+		if (ItemTable)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[CryptWorldCharacter::BeginPlay] Populating item definitions..."));
+
+			// Define all required block item entries with texture paths
+			TMap<FName, TPair<FText, FString>> ItemDefinitions;
+			ItemDefinitions.Add(TEXT("grass"), TPair<FText, FString>(FText::FromString(TEXT("Grass Block")), TEXT("/Game/Textures/Blocks/grass_top")));
+			ItemDefinitions.Add(TEXT("dirt"), TPair<FText, FString>(FText::FromString(TEXT("Dirt")), TEXT("/Game/Textures/Blocks/dirt")));
+			ItemDefinitions.Add(TEXT("stone"), TPair<FText, FString>(FText::FromString(TEXT("Stone")), TEXT("/Game/Textures/Blocks/stone")));
+			ItemDefinitions.Add(TEXT("sand"), TPair<FText, FString>(FText::FromString(TEXT("Sand")), TEXT("/Game/Textures/Blocks/sand")));
+			ItemDefinitions.Add(TEXT("gravel"), TPair<FText, FString>(FText::FromString(TEXT("Gravel")), TEXT("/Game/Textures/Blocks/gravel")));
+			ItemDefinitions.Add(TEXT("oak_log"), TPair<FText, FString>(FText::FromString(TEXT("Oak Log")), TEXT("/Game/Textures/Blocks/oaklog_side")));
+			ItemDefinitions.Add(TEXT("oak_leaves"), TPair<FText, FString>(FText::FromString(TEXT("Oak Leaves")), TEXT("/Game/Textures/Blocks/grass_top")));
+			ItemDefinitions.Add(TEXT("oak_planks"), TPair<FText, FString>(FText::FromString(TEXT("Oak Planks")), TEXT("/Game/Textures/Blocks/oakplanks")));
+			ItemDefinitions.Add(TEXT("cobblestone"), TPair<FText, FString>(FText::FromString(TEXT("Cobblestone")), TEXT("/Game/Textures/Blocks/cobblestone")));
+			ItemDefinitions.Add(TEXT("coal_ore"), TPair<FText, FString>(FText::FromString(TEXT("Coal Ore")), TEXT("/Game/Textures/Blocks/coalore")));
+			ItemDefinitions.Add(TEXT("copper_ore"), TPair<FText, FString>(FText::FromString(TEXT("Copper Ore")), TEXT("/Game/Textures/Blocks/silverore")));
+			ItemDefinitions.Add(TEXT("iron_ore"), TPair<FText, FString>(FText::FromString(TEXT("Iron Ore")), TEXT("/Game/Textures/Blocks/stone")));
+
+			int32 CreatedCount = 0;
+			for (const auto& Pair : ItemDefinitions)
+			{
+				const FName& ItemID = Pair.Key;
+				const FText& DisplayName = Pair.Value.Key;
+				const FString& TexturePath = Pair.Value.Value;
+
+				if (ItemTable->FindRow<FItemData>(ItemID, TEXT("Startup")))
+				{
+					UE_LOG(LogTemp, Log, TEXT("  ✓ Row exists: %s"), *ItemID.ToString());
+				}
+				else
+				{
+					FItemData NewItem;
+					NewItem.ItemID = ItemID;
+					NewItem.DisplayName = DisplayName;
+					NewItem.Description = FText::FromString(FString::Printf(TEXT("A block of %s"), *DisplayName.ToString()));
+					NewItem.MaxStackSize = 64;
+					NewItem.ItemType = EItemType::Block;
+					NewItem.bDroppable = true;
+					NewItem.Rarity = 0;
+					
+					// Load block texture as soft reference (won't load until needed)
+					NewItem.Icon = TSoftObjectPtr<UTexture2D>(FSoftObjectPath(*FString::Printf(TEXT("%s.%s"), *TexturePath, *FPaths::GetBaseFilename(TexturePath))));
+
+					ItemTable->AddRow(ItemID, NewItem);
+					++CreatedCount;
+					UE_LOG(LogTemp, Log, TEXT("  + Added: %s with texture: %s"), *ItemID.ToString(), *TexturePath);
+				}
+			}
+
+			UE_LOG(LogTemp, Warning, TEXT("[CryptWorldCharacter::BeginPlay] ✓✓✓ ItemDataTable ready. Created %d new rows."), CreatedCount);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Error, TEXT("[CryptWorldCharacter::BeginPlay] ✗ ItemDataTable unavailable after load attempt"));
+		}
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("[CryptWorldCharacter::BeginPlay] ✗ InventoryComponent is null!"));
 	}
 
 	// Create and show the persistent hotbar
@@ -231,6 +349,32 @@ void ACryptWorldCharacter::PlaceBlock()
 {
 	if (!VoxelWorld) return;
 
+	// Get the active hotbar slot
+	if (!InventoryComponent) return;
+	FInventorySlot ActiveSlot = InventoryComponent->GetActiveHotbarSlot();
+	if (ActiveSlot.IsEmpty())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[PlaceBlock] Active hotbar slot is empty"));
+		return;
+	}
+
+	// Find the block type that corresponds to the ItemID
+	EBlockType BlockToPlace = EBlockType::Air;
+	for (const auto& Pair : BlockTypeToItemID)
+	{
+		if (Pair.Value == ActiveSlot.ItemID)
+		{
+			BlockToPlace = Pair.Key;
+			break;
+		}
+	}
+
+	if (BlockToPlace == EBlockType::Air)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[PlaceBlock] ItemID '%s' is not a placeable block"), *ActiveSlot.ItemID.ToString());
+		return;
+	}
+
 	FHitResult Hit;
 	if (!TraceBlock(Hit)) return;
 
@@ -261,7 +405,57 @@ void ACryptWorldCharacter::PlaceBlock()
 
 	if (bInsideCapsule) return;
 
-	VoxelWorld->SetBlockAt(WorldVoxel, SelectedBlockType);
+	// Place the block
+	VoxelWorld->SetBlockAt(WorldVoxel, BlockToPlace);
+
+	// Remove one from inventory
+	if (InventoryComponent->RemoveItem(ActiveSlot.ItemID, 1))
+	{
+		UE_LOG(LogTemp, Log, TEXT("[PlaceBlock] Placed %s, removed from inventory"), *ActiveSlot.ItemID.ToString());
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[PlaceBlock] Failed to remove item from inventory: %s"), *ActiveSlot.ItemID.ToString());
+	}
+}
+
+// ---------------------------------------------------------------------------
+//  Hotbar
+// ---------------------------------------------------------------------------
+
+void ACryptWorldCharacter::Hotbar_SelectSlot_0() { SelectHotbarSlot(0); }
+void ACryptWorldCharacter::Hotbar_SelectSlot_1() { SelectHotbarSlot(1); }
+void ACryptWorldCharacter::Hotbar_SelectSlot_2() { SelectHotbarSlot(2); }
+void ACryptWorldCharacter::Hotbar_SelectSlot_3() { SelectHotbarSlot(3); }
+void ACryptWorldCharacter::Hotbar_SelectSlot_4() { SelectHotbarSlot(4); }
+void ACryptWorldCharacter::Hotbar_SelectSlot_5() { SelectHotbarSlot(5); }
+void ACryptWorldCharacter::Hotbar_SelectSlot_6() { SelectHotbarSlot(6); }
+void ACryptWorldCharacter::Hotbar_SelectSlot_7() { SelectHotbarSlot(7); }
+void ACryptWorldCharacter::Hotbar_SelectSlot_8() { SelectHotbarSlot(8); }
+void ACryptWorldCharacter::Hotbar_SelectSlot_9() { SelectHotbarSlot(9); }
+
+void ACryptWorldCharacter::Hotbar_ScrollUp()
+{
+	if (!InventoryComponent) return;
+	int32 CurrentIndex = InventoryComponent->ActiveHotbarIndex;
+	int32 NextIndex = (CurrentIndex + 1) % UInventoryComponent::HotbarSize;
+	SelectHotbarSlot(NextIndex);
+}
+
+void ACryptWorldCharacter::Hotbar_ScrollDown()
+{
+	if (!InventoryComponent) return;
+	int32 CurrentIndex = InventoryComponent->ActiveHotbarIndex;
+	int32 NextIndex = (CurrentIndex - 1 + UInventoryComponent::HotbarSize) % UInventoryComponent::HotbarSize;
+	SelectHotbarSlot(NextIndex);
+}
+
+void ACryptWorldCharacter::SelectHotbarSlot(int32 SlotIndex)
+{
+	if (!InventoryComponent) return;
+
+	InventoryComponent->SetActiveHotbarIndex(SlotIndex);
+	UE_LOG(LogTemp, Log, TEXT("[CryptWorldCharacter::SelectHotbarSlot] Switched to hotbar slot %d"), SlotIndex);
 }
 
 // ---------------------------------------------------------------------------
