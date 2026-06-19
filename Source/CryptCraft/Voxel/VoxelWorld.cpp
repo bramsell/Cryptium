@@ -143,6 +143,8 @@ void AVoxelWorld::EnsureDefaultDefinitions()
 	// Decorative / structural
 	AddBlock(EBlockType::Cobblestone,   FLinearColor(0.45f,0.45f,0.45f),        TEXT("cobblestone"),    TEXT("cobblestone"),    TEXT("cobblestone"));
 	AddBlock(EBlockType::Glass,         FLinearColor(0.70f,0.85f,0.95f,0.30f),  TEXT("glass"),          TEXT("glass"),          TEXT("glass"),          false, true);
+	// Ship system
+	AddBlock(EBlockType::ShipController, FLinearColor(0.45f,0.45f,0.45f),        TEXT("cobblestone"),    TEXT("cobblestone"),    TEXT("cobblestone"));
 	// Ores – keys match the actual .uasset filenames on disk
 	AddBlock(EBlockType::CoalOre,       FLinearColor(0.32f,0.32f,0.32f),        TEXT("coalore"),        TEXT("coalore"),        TEXT("coalore"));
 	AddBlock(EBlockType::CopperOre,     FLinearColor(0.50f,0.36f,0.28f),        TEXT(""),               TEXT(""),               TEXT(""));               // no texture yet

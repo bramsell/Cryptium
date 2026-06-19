@@ -73,10 +73,11 @@ enum class EBlockType : uint8
     DiamondOre   = 30  UMETA(DisplayName = "Diamond Ore"),
 
     MythrilOre   = 31  UMETA(DisplayName = "Mythril Ore"),
+    ShipController = 32  UMETA(DisplayName = "Ship Controller"),
 };
 
 /** Total number of block types (kept outside the enum so it doesn't pollute TMap key serialization). */
-static constexpr int32 BLOCK_TYPE_COUNT = 32;
+static constexpr int32 BLOCK_TYPE_COUNT = 33;
 
 // ---------------------------------------------------------------------------
 //  Per-block static properties – configured on AVoxelWorld

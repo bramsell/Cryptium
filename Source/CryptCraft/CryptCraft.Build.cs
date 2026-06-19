@@ -42,15 +42,10 @@ public class CryptCraft : ModuleRules
 			"CryptCraft/Variant_Shooter/AI",
 			"CryptCraft/Variant_Shooter/UI",
 			"CryptCraft/Variant_Shooter/Weapons",
-			"CryptCraft/Voxel"
-		});
+		"CryptCraft/Voxel",
+		"CryptCraft/Ships"
+	});
 
-		// Uncomment if you are using Slate UI
-		// PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });
-
-		// Uncomment if you are using online features
-		// PrivateDependencyModuleNames.Add("OnlineSubsystem");
-
-		// To include OnlineSubsystemSteam, add it to the plugins section in your uproject file with the Enabled attribute set to true
+	// To include OnlineSubsystemSteam, add it to the plugins section in your uproject file with the Enabled attribute set to true
 	}
 }

@@ -13,6 +13,10 @@
 #include "Items/ItemData.h"
 #include "UI/HotbarWidget.h"
 #include "UI/InventoryWidget.h"
+#include "UI/ShipBuildUI.h"
+#include "Ships/ControlBlock.h"
+#include "Ships/ShipDetectionComponent.h"
+#include "Ships/Ship.h"
 #include "Blueprint/UserWidget.h"
 #include "Engine/Engine.h"
 #include "Engine/GameViewportClient.h"
@@ -71,6 +75,7 @@ ACryptWorldCharacter::ACryptWorldCharacter()
 	BlockTypeToItemID.Add(EBlockType::CoalOre, FName(TEXT("coal_ore")));
 	BlockTypeToItemID.Add(EBlockType::CopperOre, FName(TEXT("copper_ore")));
 	BlockTypeToItemID.Add(EBlockType::IronOre, FName(TEXT("iron_ore")));
+	BlockTypeToItemID.Add(EBlockType::ShipController, FName(TEXT("ship_controller")));
 }
 
 void ACryptWorldCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
@@ -180,6 +185,7 @@ void ACryptWorldCharacter::BeginPlay()
 			ItemDefinitions.Add(TEXT("coal_ore"), TPair<FText, FString>(FText::FromString(TEXT("Coal Ore")), TEXT("/Game/Textures/Blocks/coalore")));
 			ItemDefinitions.Add(TEXT("copper_ore"), TPair<FText, FString>(FText::FromString(TEXT("Copper Ore")), TEXT("/Game/Textures/Blocks/silverore")));
 			ItemDefinitions.Add(TEXT("iron_ore"), TPair<FText, FString>(FText::FromString(TEXT("Iron Ore")), TEXT("/Game/Textures/Blocks/stone")));
+			ItemDefinitions.Add(TEXT("ship_controller"), TPair<FText, FString>(FText::FromString(TEXT("Ship Controller")), TEXT("/Game/Textures/Blocks/cobblestone")));
 
 			int32 CreatedCount = 0;
 			for (const auto& Pair : ItemDefinitions)
@@ -222,6 +228,20 @@ void ACryptWorldCharacter::BeginPlay()
 	else
 	{
 		UE_LOG(LogTemp, Error, TEXT("[CryptWorldCharacter::BeginPlay] ✗ InventoryComponent is null!"));
+	}
+
+	// Give the player a starting ship controller in the first hotbar slot
+	if (InventoryComponent)
+	{
+		int32 Remaining = InventoryComponent->AddItem(FName(TEXT("ship_controller")), 1);
+		if (Remaining == 0)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[CryptWorldCharacter::BeginPlay] ✓ Added starting ship_controller to inventory"));
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[CryptWorldCharacter::BeginPlay] ✗ Failed to add starting ship_controller (remaining=%d)"), Remaining);
+		}
 	}
 
 	// Create and show the persistent hotbar
@@ -271,6 +291,32 @@ bool ACryptWorldCharacter::TraceBlock(FHitResult& OutHit) const
 	return GetWorld()->LineTraceSingleByChannel(OutHit, Start, End, ECC_Visibility, Params);
 }
 
+EBlockType ACryptWorldCharacter::GetBlockTypeFromHotbar()
+{
+	if (!InventoryComponent)
+	{
+		return EBlockType::Air;
+	}
+
+	FInventorySlot ActiveSlot = InventoryComponent->GetActiveHotbarSlot();
+	if (ActiveSlot.IsEmpty())
+	{
+		return EBlockType::Air;
+	}
+
+	// Find the block type that corresponds to the ItemID
+	for (const auto& Pair : BlockTypeToItemID)
+	{
+		if (Pair.Value == ActiveSlot.ItemID)
+		{
+			return Pair.Key;
+		}
+	}
+
+	// Item is not a placeable block
+	return EBlockType::Air;
+}
+
 void ACryptWorldCharacter::BreakBlock()
 {
 	if (!VoxelWorld) return;
@@ -278,6 +324,55 @@ void ACryptWorldCharacter::BreakBlock()
 	FHitResult Hit;
 	if (!TraceBlock(Hit)) return;
 
+	// Check if we hit a ship actor first
+	AShip* HitShip = Cast<AShip>(Hit.GetActor());
+	if (HitShip)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[BreakBlock] Left-clicked on ship actor"));
+
+		// Step inward along the negative normal to land inside the hit block
+		const FVector InsideBlock = Hit.ImpactPoint - Hit.ImpactNormal * (BLOCK_SIZE * 0.5f);
+
+		// Convert the hit point to ship-local coordinates
+		FVector HitPointInShip = InsideBlock - HitShip->GetActorLocation();
+		HitPointInShip = HitShip->GetActorQuat().Inverse().RotateVector(HitPointInShip);
+		
+		// Convert to block coordinates
+		FIntVector LocalBlockCoord = FIntVector(
+			FMath::FloorToInt(HitPointInShip.X / BLOCK_SIZE),
+			FMath::FloorToInt(HitPointInShip.Y / BLOCK_SIZE),
+			FMath::FloorToInt(HitPointInShip.Z / BLOCK_SIZE)
+		);
+
+		// Don't allow removing the control block!
+		if (LocalBlockCoord == FIntVector::ZeroValue)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[BreakBlock] Cannot break the control block"));
+			return;
+		}
+
+		// Check if the block exists on the ship
+		EBlockType BlockAtCoord = HitShip->GetBlockAt(LocalBlockCoord);
+		if (BlockAtCoord == EBlockType::Air)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[BreakBlock] No block to break at ship local %d,%d,%d"), 
+				LocalBlockCoord.X, LocalBlockCoord.Y, LocalBlockCoord.Z);
+			return;
+		}
+
+		EBlockType BrokenType = BlockAtCoord;
+
+		// Remove the block from the ship (this will trigger mesh rebuild)
+		HitShip->RemoveBlockFromShip(LocalBlockCoord);
+		UE_LOG(LogTemp, Log, TEXT("[BreakBlock] Broke block type %d from ship at local %d,%d,%d"), 
+			(int32)BrokenType, LocalBlockCoord.X, LocalBlockCoord.Y, LocalBlockCoord.Z);
+
+		// TODO: Drop item pickup for ship blocks (optional for now)
+
+		return;  // Exit after handling ship block
+	}
+
+	// Otherwise, handle world voxel blocks
 	// Step slightly INWARD along the negative normal to land inside the hit block.
 	const FVector InsideBlock = Hit.ImpactPoint - Hit.ImpactNormal * (BLOCK_SIZE * 0.5f);
 
@@ -349,29 +444,113 @@ void ACryptWorldCharacter::PlaceBlock()
 {
 	if (!VoxelWorld) return;
 
-	// Get the active hotbar slot
-	if (!InventoryComponent) return;
-	FInventorySlot ActiveSlot = InventoryComponent->GetActiveHotbarSlot();
-	if (ActiveSlot.IsEmpty())
+	// Trace from player camera
+	FHitResult HitResult;
+	if (!TraceBlock(HitResult)) return;
+
+	// Check if we hit a ship actor
+	AShip* HitShip = Cast<AShip>(HitResult.GetActor());
+	if (HitShip)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[PlaceBlock] Active hotbar slot is empty"));
+		UE_LOG(LogTemp, Log, TEXT("[PlaceBlock] Right-clicked on ship actor"));
+
+		// Convert the hit point to ship-local coordinates
+		FVector HitPointInShip = HitResult.ImpactPoint - HitShip->GetActorLocation();
+		HitPointInShip = HitShip->GetActorQuat().Inverse().RotateVector(HitPointInShip);
+		
+		// Convert to block coordinates
+		FIntVector LocalBlockCoord = FIntVector(
+			FMath::FloorToInt(HitPointInShip.X / BLOCK_SIZE),
+			FMath::FloorToInt(HitPointInShip.Y / BLOCK_SIZE),
+			FMath::FloorToInt(HitPointInShip.Z / BLOCK_SIZE)
+		);
+
+		// Check if this is the control block (at origin 0,0,0)
+		// Also accept adjacent coordinates to give player some tolerance
+		if (LocalBlockCoord == FIntVector::ZeroValue || 
+			(FMath::Abs(LocalBlockCoord.X) <= 1 && FMath::Abs(LocalBlockCoord.Y) <= 1 && FMath::Abs(LocalBlockCoord.Z) <= 1 &&
+			 FVector(HitPointInShip).Length() < BLOCK_SIZE))
+		{
+			UE_LOG(LogTemp, Log, TEXT("[PlaceBlock] Clicked on/near control block at local %d,%d,%d - possessing ship"), 
+				LocalBlockCoord.X, LocalBlockCoord.Y, LocalBlockCoord.Z);
+
+			// Check if we're already piloting this ship
+			APlayerController* PC = GetController<APlayerController>();
+			if (PC && PC->GetPawn() == HitShip)
+			{
+				// We're piloting this ship - depossess it
+				UE_LOG(LogTemp, Log, TEXT("[PlaceBlock] Depossessing ship"));
+				PC->UnPossess();
+				PC->Possess(this);  // Possess the character again
+			}
+			else
+			{
+				// We're not piloting this ship - try to possess it
+				UE_LOG(LogTemp, Log, TEXT("[PlaceBlock] Possessing ship"));
+				if (PC)
+				{
+					PC->Possess(HitShip);
+				}
+			}
+			return;  // EXIT EARLY - possession takes priority over block placement
+		}
+		else
+		{
+			UE_LOG(LogTemp, Log, TEXT("[PlaceBlock] Clicked on ship block at local coord %d,%d,%d - attempting to place block"), 
+				LocalBlockCoord.X, LocalBlockCoord.Y, LocalBlockCoord.Z);
+
+			// Get block type from active hotbar slot
+			EBlockType BlockToPlace = GetBlockTypeFromHotbar();
+			if (BlockToPlace == EBlockType::Air)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[PlaceBlock] Active hotbar slot is empty or not a placeable block"));
+				return;
+			}
+
+			// Find the adjacent block to place on (step outward from the hit surface)
+			FVector OutsideBlock = HitResult.ImpactPoint + HitResult.ImpactNormal * (BLOCK_SIZE * 0.5f);
+			FVector OutsideBlockInShip = OutsideBlock - HitShip->GetActorLocation();
+			OutsideBlockInShip = HitShip->GetActorQuat().Inverse().RotateVector(OutsideBlockInShip);
+			
+			FIntVector AdjacentLocalCoord = FIntVector(
+				FMath::FloorToInt(OutsideBlockInShip.X / BLOCK_SIZE),
+				FMath::FloorToInt(OutsideBlockInShip.Y / BLOCK_SIZE),
+				FMath::FloorToInt(OutsideBlockInShip.Z / BLOCK_SIZE)
+			);
+
+			// Add the block to the ship grid
+			HitShip->AddBlockToShip(AdjacentLocalCoord, BlockToPlace);
+			UE_LOG(LogTemp, Log, TEXT("[PlaceBlock] Added block type %d to ship at local %d,%d,%d"), 
+				(int32)BlockToPlace, AdjacentLocalCoord.X, AdjacentLocalCoord.Y, AdjacentLocalCoord.Z);
+		}
 		return;
 	}
 
-	// Find the block type that corresponds to the ItemID
-	EBlockType BlockToPlace = EBlockType::Air;
-	for (const auto& Pair : BlockTypeToItemID)
+	// Otherwise, trace to get world voxel coordinate
+	const FVector InsideBlock = HitResult.ImpactPoint - HitResult.ImpactNormal * (BLOCK_SIZE * 0.5f);
+
+	const FIntVector VoxelCoord = FIntVector(
+		FMath::FloorToInt(InsideBlock.X / BLOCK_SIZE),
+		FMath::FloorToInt(InsideBlock.Y / BLOCK_SIZE),
+		FMath::FloorToInt(InsideBlock.Z / BLOCK_SIZE));
+
+	EBlockType HitBlockType = VoxelWorld->GetBlockAt(VoxelCoord);
+	UE_LOG(LogTemp, Log, TEXT("[PlaceBlock] Hit voxel at %s, block type=%d"), *VoxelCoord.ToString(), (int32)HitBlockType);
+
+	// If we hit a ship controller block, run flood fill
+	if (HitBlockType == EBlockType::ShipController)
 	{
-		if (Pair.Value == ActiveSlot.ItemID)
-		{
-			BlockToPlace = Pair.Key;
-			break;
-		}
+		UE_LOG(LogTemp, Log, TEXT("[PlaceBlock] Right-clicked on ship controller block at %s"), *VoxelCoord.ToString());
+		TriggerShipDetection(VoxelCoord);
+		return;
 	}
 
+	// Normal block placement logic
+	// Get block type from active hotbar slot
+	EBlockType BlockToPlace = GetBlockTypeFromHotbar();
 	if (BlockToPlace == EBlockType::Air)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[PlaceBlock] ItemID '%s' is not a placeable block"), *ActiveSlot.ItemID.ToString());
+		UE_LOG(LogTemp, Warning, TEXT("[PlaceBlock] Active hotbar slot is empty or not a placeable block"));
 		return;
 	}
 
@@ -405,17 +584,21 @@ void ACryptWorldCharacter::PlaceBlock()
 
 	if (bInsideCapsule) return;
 
-	// Place the block
+	// Place the block in the voxel grid
 	VoxelWorld->SetBlockAt(WorldVoxel, BlockToPlace);
 
-	// Remove one from inventory
-	if (InventoryComponent->RemoveItem(ActiveSlot.ItemID, 1))
+	// Remove one from inventory (get fresh slot reference for ItemID)
+	if (InventoryComponent)
 	{
-		UE_LOG(LogTemp, Log, TEXT("[PlaceBlock] Placed %s, removed from inventory"), *ActiveSlot.ItemID.ToString());
-	}
-	else
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[PlaceBlock] Failed to remove item from inventory: %s"), *ActiveSlot.ItemID.ToString());
+		FInventorySlot ActiveSlot = InventoryComponent->GetActiveHotbarSlot();
+		if (InventoryComponent->RemoveItem(ActiveSlot.ItemID, 1))
+		{
+			UE_LOG(LogTemp, Log, TEXT("[PlaceBlock] Placed %s, removed from inventory"), *ActiveSlot.ItemID.ToString());
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[PlaceBlock] Failed to remove item from inventory: %s"), *ActiveSlot.ItemID.ToString());
+		}
 	}
 }
 
@@ -526,4 +709,78 @@ void ACryptWorldCharacter::ToggleInventory()
 
 		bInventoryOpen = false;
 	}
+}
+
+void ACryptWorldCharacter::TriggerShipDetection(FIntVector ControlBlockCoord)
+{
+	if (!VoxelWorld)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[TriggerShipDetection] VoxelWorld not available"));
+		return;
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[TriggerShipDetection] ========== SHIP DETECTION START =========="));
+	UE_LOG(LogTemp, Log, TEXT("[TriggerShipDetection] Control block at: %s"), *ControlBlockCoord.ToString());
+
+	// Run ship detection using the static function
+	TMap<FIntVector, EBlockType> DetectedBlocks;
+	int32 BlockCount = UShipDetectionComponent::DetectConnectedBlocks(
+		VoxelWorld,
+		ControlBlockCoord,
+		10000,  // Max block count
+		DetectedBlocks);
+
+	if (BlockCount <= 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[TriggerShipDetection] ✗ FLOOD FILL FAILED - No connected blocks detected!"));
+		UE_LOG(LogTemp, Log, TEXT("[TriggerShipDetection] ========== SHIP DETECTION END =========="));
+		return;
+	}
+
+	// Check if we hit the block limit (means there are likely more blocks)
+	if (BlockCount >= 10000)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[TriggerShipDetection] ✗ FLOOD FILL FAILED - Ship is too large! (>10000 blocks detected)"));
+		UE_LOG(LogTemp, Log, TEXT("[TriggerShipDetection] ========== SHIP DETECTION END =========="));
+		return;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[TriggerShipDetection] ✓ FLOOD FILL SUCCESSFUL - Detected %d connected blocks"), BlockCount);
+
+	// Spawn the ship at the control block position
+	const FVector ControlBlockWorldPos(
+		(ControlBlockCoord.X + 0.5f) * BLOCK_SIZE,
+		(ControlBlockCoord.Y + 0.5f) * BLOCK_SIZE,
+		(ControlBlockCoord.Z + 0.5f) * BLOCK_SIZE);
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
+
+	AShip* NewShip = GetWorld()->SpawnActor<AShip>(
+		AShip::StaticClass(),
+		ControlBlockWorldPos,
+		FRotator::ZeroRotator,
+		SpawnParams);
+
+	if (NewShip)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[TriggerShipDetection] Spawned AShip at %s"), *ControlBlockWorldPos.ToString());
+
+		// Initialize the ship with detected blocks (handles atomic transfer)
+		if (NewShip->InitializeFromDetectedBlocks(DetectedBlocks, ControlBlockCoord, VoxelWorld))
+		{
+			UE_LOG(LogTemp, Log, TEXT("[TriggerShipDetection] ✓ Ship initialized successfully with %d blocks"), BlockCount);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[TriggerShipDetection] ✗ Failed to initialize ship"));
+			NewShip->Destroy();
+		}
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[TriggerShipDetection] ✗ Failed to spawn AShip actor"));
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[TriggerShipDetection] ========== SHIP DETECTION END =========="));
 }
