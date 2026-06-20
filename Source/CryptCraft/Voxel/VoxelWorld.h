@@ -92,6 +92,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Blocks")
 	TMap<EBlockType, FBlockDefinition> BlockDefinitions;
 
+	/**
+	 * Minimum brightness floor for block faces. Prevents completely black faces.
+	 * Range: 0.0 (no clamping) to 1.0 (all faces fully bright).
+	 * Recommended: 0.30 (30% minimum brightness on any face).
+	 * This is applied in the material via a Max(LightingResult, MinBrightness) operation.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Lighting", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float MinimumBrightness = 0.30f;
+
 	// -----------------------------------------------------------------------
 	//  Runtime API
 	// -----------------------------------------------------------------------
@@ -123,6 +132,15 @@ public:
 	{
 		return RuntimeChunkMaterial ? RuntimeChunkMaterial.Get() : ChunkMaterial.Get();
 	}
+
+	/**
+	 * Returns the direction vector from the directional light (sun) in the world.
+	 * The vector points in the direction the light is shining FROM.
+	 * If no directional light is found, returns (0, 0, -1) as default (downward).
+	 * Used for computing per-face brightness in mesh generation.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel")
+	FVector GetSunDirection() const;
 
 	/**
 	 * Returns the world-space position a player should spawn at above this

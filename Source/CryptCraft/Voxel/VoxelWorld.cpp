@@ -3,8 +3,11 @@
 #include "VoxelWorld.h"
 #include "Chunk.h"
 #include "Engine/Texture2D.h"
+#include "Engine/DirectionalLight.h"
+#include "Components/DirectionalLightComponent.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "TextureResource.h"
+#include "EngineUtils.h"
 #include "WorldGen/LayerSurface.h"         // FSurfaceLevelGenerator
 #include "WorldGen/LayerCrystalCaves.h"      // FCrystalCavesLevelGenerator
 #include "WorldGen/LayerPrimordialCavern.h"             // FPrimordialCavernLevelGenerator
@@ -152,12 +155,12 @@ void AVoxelWorld::EnsureDefaultDefinitions()
 	AddBlock(EBlockType::SilverOre,     FLinearColor(0.70f,0.70f,0.72f),        TEXT("silverore"),      TEXT("silverore"),      TEXT("silverore"));
 	AddBlock(EBlockType::GoldOre,       FLinearColor(0.55f,0.50f,0.22f),        TEXT("goldore"),        TEXT("goldore"),        TEXT("goldore"));
 	AddBlock(EBlockType::PlatinumOre,   FLinearColor(0.65f,0.68f,0.72f),        TEXT("platinumore"),    TEXT("platinumore"),    TEXT("platinumore"));
-	// Gem ores
-	AddBlock(EBlockType::JadeOre,       FLinearColor(0.36f,0.55f,0.38f),        TEXT("jade"),           TEXT("jade"),           TEXT("jade"));
-	AddBlock(EBlockType::RubyOre,       FLinearColor(0.58f,0.30f,0.30f),        TEXT("rubyore"),        TEXT("rubyore"),        TEXT("rubyore"));
-	AddBlock(EBlockType::EmeraldOre,    FLinearColor(0.28f,0.58f,0.30f),        TEXT(""),               TEXT(""),               TEXT(""));               // no texture yet
-	AddBlock(EBlockType::SapphireOre,   FLinearColor(0.28f,0.32f,0.65f),        TEXT(""),               TEXT(""),               TEXT(""));               // no texture yet
-	AddBlock(EBlockType::DiamondOre,    FLinearColor(0.38f,0.58f,0.72f),        TEXT("diamondore"),     TEXT("diamondore"),     TEXT("diamondore"));
+	// Gem ores – bright colors for visibility/glow effect in caves
+	AddBlock(EBlockType::JadeOre,       FLinearColor(0.45f,0.75f,0.55f),        TEXT("jade"),           TEXT("jade"),           TEXT("jade"));
+	AddBlock(EBlockType::RubyOre,       FLinearColor(0.95f,0.20f,0.20f),        TEXT("rubyore"),        TEXT("rubyore"),        TEXT("rubyore"));
+	AddBlock(EBlockType::EmeraldOre,    FLinearColor(0.20f,0.85f,0.35f),        TEXT(""),               TEXT(""),               TEXT(""));               // no texture yet
+	AddBlock(EBlockType::SapphireOre,   FLinearColor(0.25f,0.50f,0.95f),        TEXT(""),               TEXT(""),               TEXT(""));               // no texture yet
+	AddBlock(EBlockType::DiamondOre,    FLinearColor(0.55f,0.85f,0.95f),        TEXT("diamondore"),     TEXT("diamondore"),     TEXT("diamondore"));
 	AddBlock(EBlockType::MythrilOre,    FLinearColor(0.32f,0.62f,0.70f),        TEXT("mythrilore"),     TEXT("mythrilore"),     TEXT("mythrilore"));
 }
 
@@ -616,6 +619,8 @@ void AVoxelWorld::BuildTextureAtlas()
 	{
 		RuntimeChunkMaterial = UMaterialInstanceDynamic::Create(ChunkMaterial, this);
 		RuntimeChunkMaterial->SetTextureParameterValue(TEXT("AtlasTexture"), RuntimeAtlas);
+		RuntimeChunkMaterial->SetScalarParameterValue(TEXT("MinimumBrightness"), MinimumBrightness);
+		UE_LOG(LogTemp, Warning, TEXT("VoxelWorld: Set MinimumBrightness = %.2f on dynamic material"), MinimumBrightness);
 	}
 	else
 	{
@@ -820,6 +825,27 @@ FVector AVoxelWorld::GetPlayerSpawnLocation() const
 		
 		return FVector(0.f, 0.f, SpawnZ);
 	}
+}
+
+// ---------------------------------------------------------------------------
+//  Sun direction (for per-face brightness computation)
+// ---------------------------------------------------------------------------
+
+FVector AVoxelWorld::GetSunDirection() const
+{
+	// Query the world for a DirectionalLight actor
+	for (TActorIterator<ADirectionalLight> It(GetWorld()); It; ++It)
+	{
+		ADirectionalLight* Light = *It;
+		if (Light && Light->IsValidLowLevel())
+		{
+			// Return the forward vector (direction the light shines from)
+			return Light->GetActorForwardVector();
+		}
+	}
+	
+	// No directional light found – return default downward direction
+	return FVector(0.f, 0.f, -1.f);
 }
 
 // (GenerateChunkData removed — routing is now handled by FWorldGenerationManager::RouteChunkGeneration)

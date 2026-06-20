@@ -2,7 +2,10 @@
 
 #include "CryptCraftGameMode.h"
 #include "EngineUtils.h"
+#include "Engine/DirectionalLight.h"
 #include "Components/DirectionalLightComponent.h"
+#include "Components/SkyLightComponent.h"
+#include "Engine/SkyLight.h"
 
 ACryptCraftGameMode::ACryptCraftGameMode()
 {
@@ -155,7 +158,7 @@ void ACryptCraftGameMode::EnsureSkyLight()
 		return;
 	}
 
-	if (UDirectionalLightComponent* LC = Fill->GetComponent())
+	if (UDirectionalLightComponent* LC = Cast<UDirectionalLightComponent>(Fill->GetLightComponent()))
 	{
 		// Low intensity – just enough to see in a cave, not enough to wash
 		// out outdoor surfaces.
@@ -175,6 +178,79 @@ void ACryptCraftGameMode::EnsureSkyLight()
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("CryptCraftGameMode: Auto-spawned fill light."));
+
+	// =========================================================================
+	// SKYATMOSPHERE: Required for SkyLight real-time capture to work
+	// =========================================================================
+
+	// TODO: SkyAtmosphere spawn temporarily disabled until correct header is identified
+	// For now, rely on environment's existing sky or create via Blueprint
+	//
+	// ASkyAtmosphere should be present in the level for SkyLight real-time capture
+	// to work properly. If you see "SkyLight with real-time capture requires SkyAtmosphere"
+	// warning, add a SkyAtmosphere actor to the level or implement spawn here.
+
+	// =========================================================================
+	// SKYLIGHT: Add a SkyLight for better ambient cave illumination
+	// =========================================================================
+
+	UE_LOG(LogTemp, Warning, TEXT("CryptCraftGameMode: === Starting SkyLight spawn process ==="));
+
+	// Check if SkyLight already exists
+	for (TActorIterator<ASkyLight> It(GetWorld()); It; ++It)
+	{
+		if (*It && (*It)->GetName().Contains(TEXT("AutoSky")))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("CryptCraftGameMode: SkyLight already exists, skipping spawn."));
+			return;
+		}
+	}
+
+	FActorSpawnParameters SkyParams;
+	SkyParams.Name = TEXT("AutoSkyLight");
+
+	ASkyLight* SkyLight = GetWorld()->SpawnActor<ASkyLight>(
+		ASkyLight::StaticClass(),
+		FVector::ZeroVector,
+		FRotator::ZeroRotator,
+		SkyParams
+	);
+
+	if (!SkyLight)
+	{
+		UE_LOG(LogTemp, Error, TEXT("CryptCraftGameMode: Failed to spawn ASkyLight actor!"));
+		return;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("CryptCraftGameMode: ASkyLight spawned: %s"), *SkyLight->GetName());
+
+	USkyLightComponent* SkyLC = Cast<USkyLightComponent>(SkyLight->GetLightComponent());
+	if (!SkyLC)
+	{
+		UE_LOG(LogTemp, Error, TEXT("CryptCraftGameMode: SkyLight actor has no USkyLightComponent!"));
+		return;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("CryptCraftGameMode: SkyLightComponent found"));
+
+	// Moderate intensity for ambient cave lighting
+	SkyLC->SetIntensity(0.3f);
+	UE_LOG(LogTemp, Warning, TEXT("CryptCraftGameMode: Set SkyLight intensity to 0.3"));
+
+	// Cool blue color for cave atmosphere
+	SkyLC->SetLightColor(FLinearColor(0.50f, 0.60f, 0.85f));
+	UE_LOG(LogTemp, Warning, TEXT("CryptCraftGameMode: Set SkyLight color to blue-grey"));
+
+	// Use real-time scene capture so it adapts to the environment
+	SkyLC->bRealTimeCapture = true;
+	UE_LOG(LogTemp, Warning, TEXT("CryptCraftGameMode: Enabled real-time capture"));
+
+	// Mark for update and rendering
+	SkyLC->MarkRenderStateDirty();
+	SkyLight->UpdateComponentTransforms();
+	UE_LOG(LogTemp, Warning, TEXT("CryptCraftGameMode: Marked render state dirty and updated transforms"));
+
+	UE_LOG(LogTemp, Warning, TEXT("CryptCraftGameMode: Auto-spawned SkyLight for cave ambient lighting."));
 }
 
 void ACryptCraftGameMode::EnsureDirectionalLight()
@@ -202,7 +278,7 @@ void ACryptCraftGameMode::EnsureDirectionalLight()
 	}
 
 	// Configure intensity and enable atmosphere / sky atmosphere casting
-	if (UDirectionalLightComponent* LightComp = Sun->GetComponent())
+	if (UDirectionalLightComponent* LightComp = Cast<UDirectionalLightComponent>(Sun->GetLightComponent()))
 	{
 		LightComp->SetIntensity(SunIntensity);
 		LightComp->SetAtmosphereSunLight(true);
