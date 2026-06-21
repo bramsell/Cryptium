@@ -5,13 +5,12 @@
 #include "LayerBase.h"
 #include "Voxel/Chunk.h"
 
-void FFrostbittenLevelGenerator::GenerateChunk(
-	AChunk& Chunk,
+void FFrostbittenLevelGenerator::GenerateBlocks(
 	int32 GlobalChunkX,
 	int32 GlobalChunkY,
-	int32 LocalChunkZ)
+	int32 LocalChunkZ,
+	TArray<EBlockType>& OutBlocks)
 {
-	TArray<EBlockType> OutBlocks;
 	OutBlocks.SetNum(CHUNK_SIZE_X * CHUNK_SIZE_Y * CHUNK_SIZE_Z);
 
 	for (int32 X = 0; X < CHUNK_SIZE_X; ++X)
@@ -31,6 +30,15 @@ void FFrostbittenLevelGenerator::GenerateChunk(
 	// TODO: Add cryo-crystal ore deposits
 	// TODO: Add frozen cavern chamber carving
 	// TODO: Add cryo-structure / permafrost formation placement
+}
 
-	Chunk.Initialize(OutBlocks);
+void FFrostbittenLevelGenerator::GenerateChunk(
+	AChunk& Chunk,
+	int32 GlobalChunkX,
+	int32 GlobalChunkY,
+	int32 LocalChunkZ)
+{
+	TArray<EBlockType> Blocks;
+	GenerateBlocks(GlobalChunkX, GlobalChunkY, LocalChunkZ, Blocks);
+	Chunk.Initialize(Blocks);
 }

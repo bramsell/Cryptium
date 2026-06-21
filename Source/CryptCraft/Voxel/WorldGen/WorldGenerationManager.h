@@ -51,6 +51,17 @@ public:
 	// -----------------------------------------------------------------------
 
 	/**
+	 * Background-thread-safe routing: resolves GlobalChunkZ to a generator and
+	 * calls GenerateBlocks() to fill OutBlocks.  Does NOT call Initialize().
+	 * Safe to call from any thread — no UObject access.
+	 */
+	void RouteBlockGeneration(
+		int32 GlobalChunkX,
+		int32 GlobalChunkY,
+		int32 GlobalChunkZ,
+		TArray<EBlockType>& OutBlocks) const;
+
+	/**
 	 * Identify which level owns GlobalChunkZ, compute LocalChunkZ, and call
 	 * that level's GenerateChunk(). The chunk must already have ChunkCoord
 	 * and VoxelWorld set; Initialize() is called inside the generator.

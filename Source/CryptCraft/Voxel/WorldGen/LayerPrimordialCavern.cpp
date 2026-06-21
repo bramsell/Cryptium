@@ -131,19 +131,17 @@ static constexpr int32 TERRAIN_END_Z       = 7;
 //  GenerateChunk
 // ---------------------------------------------------------------------------
 
-void FPrimordialCavernLevelGenerator::GenerateChunk(
-	AChunk& Chunk,
+void FPrimordialCavernLevelGenerator::GenerateBlocks(
 	int32 GlobalChunkX,
 	int32 GlobalChunkY,
-	int32 LocalChunkZ)
+	int32 LocalChunkZ,
+	TArray<EBlockType>& OutBlocks)
 {
-	TArray<EBlockType> OutBlocks;
 
 	// ---- Solid stone ceiling ----------------------------------------
 	if (LocalChunkZ == CEILING_SOLID_Z)
 	{
 		OutBlocks.Init(EBlockType::Stone, CHUNK_SIZE_X * CHUNK_SIZE_Y * CHUNK_SIZE_Z);
-		Chunk.Initialize(OutBlocks);
 		return;
 	}
 
@@ -151,7 +149,6 @@ void FPrimordialCavernLevelGenerator::GenerateChunk(
 	if (LocalChunkZ >= AIR_VOID_START_Z && LocalChunkZ <= AIR_VOID_END_Z)
 	{
 		OutBlocks.Init(EBlockType::Air, CHUNK_SIZE_X * CHUNK_SIZE_Y * CHUNK_SIZE_Z);
-		Chunk.Initialize(OutBlocks);
 		return;
 	}
 
@@ -179,7 +176,6 @@ void FPrimordialCavernLevelGenerator::GenerateChunk(
 				}
 			}
 		}
-		Chunk.Initialize(OutBlocks);
 		return;
 	}
 
@@ -264,11 +260,20 @@ void FPrimordialCavernLevelGenerator::GenerateChunk(
 				}
 			}
 		}
-		Chunk.Initialize(OutBlocks);
 		return;
 	}
 
 	// Fallback (shouldn't happen)
 	OutBlocks.Init(EBlockType::Stone, CHUNK_SIZE_X * CHUNK_SIZE_Y * CHUNK_SIZE_Z);
-	Chunk.Initialize(OutBlocks);
+}
+
+void FPrimordialCavernLevelGenerator::GenerateChunk(
+	AChunk& Chunk,
+	int32 GlobalChunkX,
+	int32 GlobalChunkY,
+	int32 LocalChunkZ)
+{
+	TArray<EBlockType> Blocks;
+	GenerateBlocks(GlobalChunkX, GlobalChunkY, LocalChunkZ, Blocks);
+	Chunk.Initialize(Blocks);
 }

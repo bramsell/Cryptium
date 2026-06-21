@@ -13,6 +13,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Voxel/VoxelTypes.h"
 
 class AChunk;
 
@@ -33,6 +34,23 @@ public:
 	 * @param GlobalChunkY  World grid Y of this chunk.
 	 * @param LocalChunkZ   Z index within this level (0 = top, 7 = bottom).
 	 *                      For Level 0 (surface), this equals GlobalChunkZ.
+	 */
+	/**
+	 * Pure-computation half of generation: fills OutBlocks with the block data
+	 * for this chunk.  No UObject access — safe to call from a background thread.
+	 *
+	 * @param OutBlocks  Receives exactly CHUNK_SIZE_X * CHUNK_SIZE_Y * CHUNK_SIZE_Z entries.
+	 */
+	virtual void GenerateBlocks(
+		int32 GlobalChunkX,
+		int32 GlobalChunkY,
+		int32 LocalChunkZ,
+		TArray<EBlockType>& OutBlocks) = 0;
+
+	/**
+	 * Convenience wrapper: calls GenerateBlocks then Chunk.Initialize().
+	 * Behaviour is identical to the old synchronous path and is still used
+	 * by any caller that wants a fully-ready chunk in one call.
 	 */
 	virtual void GenerateChunk(
 		AChunk& Chunk,

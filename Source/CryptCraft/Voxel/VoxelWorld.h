@@ -129,6 +129,9 @@ public:
 	/** Number of tiles along one axis of the runtime atlas (computed at BeginPlay). */
 	int32 GetAtlasCols() const { return ComputedAtlasCols; }
 
+	/** Texture-name → atlas tile index map; copied into mesh snapshots for background meshing. */
+	const TMap<FString, int32>& GetTileIndexMap() const { return TextureToTileIndex; }
+
 	/** Accessor used by chunks to retrieve the (possibly dynamic) chunk material. */
 	UFUNCTION(BlueprintPure, Category = "Voxel")
 	UMaterialInterface* GetChunkMaterial() const
@@ -169,6 +172,11 @@ private:
 	// -----------------------------------------------------------------------
 	UPROPERTY()
 	TMap<FIntVector, TObjectPtr<AChunk>> LoadedChunks;
+
+	// Chunks currently being generated on a background thread.
+	// Kept as a UPROPERTY so GC doesn't collect the actor before Initialize() runs.
+	UPROPERTY()
+	TMap<FIntVector, TObjectPtr<AChunk>> PendingChunkActors;
 
 	FIntVector LastPlayerChunkCoord = FIntVector(INT_MAX, INT_MAX, INT_MAX);
 	float      StreamingTimer       = 0.f;

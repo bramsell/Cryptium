@@ -12,6 +12,31 @@
 class UProceduralMeshComponent;
 class AVoxelWorld;
 
+// ---------------------------------------------------------------------------
+//  Snapshot of all data required to run BuildGreedyMesh on a background thread.
+//  Constructed on the game thread; contains no UObject pointers, safe to read
+//  from any thread.
+// ---------------------------------------------------------------------------
+struct FChunkMeshSnapshot
+{
+	// Own chunk's block data
+	TArray<EBlockType> OwnBlocks;          // empty when bOwnIsUniform == true
+	bool       bOwnIsUniform   = false;
+	EBlockType OwnUniformType  = EBlockType::Air;
+
+	// One face slice from each of the 6 face-adjacent neighbors.
+	// Ordering: [0]=+X, [1]=-X, [2]=+Y, [3]=-Y, [4]=+Z, [5]=-Z
+	// An empty array means the neighbor is not loaded — all its blocks treated as Air.
+	TArray<EBlockType> NeighborFaces[6];
+
+	// World rendering constants — value-copied, no live UObject references.
+	TMap<EBlockType, FBlockDefinition> BlockDefs;
+	TMap<FString, int32>               TileIndexMap;
+	int32   AtlasCols         = 1;
+	FVector SunDirection      = FVector(0.f, 0.f, 1.f);
+	float   MinimumBrightness = 0.3f;
+};
+
 UCLASS()
 class CRYPTCRAFT_API AChunk : public AActor
 {
@@ -85,29 +110,20 @@ private:
 	//  Mesh building
 	// -----------------------------------------------------------------------
 
-	/**
-	 * Returns true if the block at (X, Y, Z) occludes adjacent faces.
-	 * Queries the owning VoxelWorld for coordinates that fall outside this chunk.
-	 */
-	bool IsBlockOpaque(int32 X, int32 Y, int32 Z) const;
-
-	/** Returns the block type at local coords, querying the world for out-of-bounds. */
-	EBlockType GetBlockWithNeighbors(int32 X, int32 Y, int32 Z) const;
+	/** Snapshot all game-thread data needed for meshing into a self-contained struct. */
+	FChunkMeshSnapshot BuildMeshSnapshot() const;
 
 	/**
-	 * Greedy meshing: for each of the 6 face directions, sweep slices and merge
-	 * adjacent same-type faces into the fewest possible quads.
+	 * Pure function: builds mesh geometry from a snapshot with no live UObject access.
+	 * Safe to call from any thread.
 	 */
-	// OutColors encodes the atlas address per vertex:
-	//   R = atlas U offset (0..1),  G = atlas V offset (0..1)
-	//   B = tile size (1 / AtlasTileCount),  A = 1
-	// Material formula:  atlasUV = frac(UV0) * Color.b + Color.rg
-	void BuildGreedyMesh(
-		TArray<FVector>&       OutVertices,
-		TArray<int32>&         OutTriangles,
-		TArray<FVector>&       OutNormals,
-		TArray<FVector2D>&     OutUVs,
-		TArray<FLinearColor>&  OutColors);
+	static void BuildGreedyMeshFromSnapshot(
+		const FChunkMeshSnapshot& Snap,
+		TArray<FVector>&          OutVertices,
+		TArray<int32>&            OutTriangles,
+		TArray<FVector>&          OutNormals,
+		TArray<FVector2D>&        OutUVs,
+		TArray<FLinearColor>&     OutColors);
 
 	/** Flat array index with bounds check (returns false if out of range). */
 	static bool BlockIndex(int32 X, int32 Y, int32 Z, int32& OutIndex);
