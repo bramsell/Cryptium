@@ -54,6 +54,7 @@ protected:
 private:
 	AVoxelWorld* EnsureVoxelWorld();
 	void EnsureDirectionalLight();
+	void EnsureSkyAtmosphere();
 	void EnsureSkyLight();
 
 	/**

@@ -361,24 +361,14 @@ void AChunk::BuildGreedyMesh(
 					OutNormals.Add(Normal);
 					OutNormals.Add(Normal);
 
-					// Compute per-face brightness based on normal vs. sun direction
-					// This will be encoded in vertex color alpha and used by the material
-					float FaceBrightness = 0.5f;  // Default midtone if VoxelWorld unavailable
-					if (VoxelWorld)
-					{
-						const FVector SunDir = VoxelWorld->GetSunDirection();
-						FaceBrightness = FMath::Max(0.f, FVector::DotProduct(Normal, SunDir));  // dot product clamped to [0, 1]
-						FaceBrightness = FMath::Max(FaceBrightness, VoxelWorld->MinimumBrightness);  // Apply minimum brightness clamp
-					}
+// Vertex colors encode atlas tile address and UV info.
+				// Brightness is handled by UE5's native lighting system (normal + directional/sky lights).
 
-					// UVs: tile-space coordinates (0..w, 0..h) so the material can
-					// frac() them for per-block texture repetition on greedy-merged quads.
 					// Vertex colour encodes the atlas tile address:
 					//   R = atlas tile U origin,  G = atlas tile V origin
 					//   B = tile size (1/AtlasCols; atlas is square so same for U and V)
-					//   A = per-face brightness (computed from normal · sunDirection, clamped to MinimumBrightness)
+					//   A = 1.0 (full opacity, brightness handled by UE5 lighting)
 					// Material formula:  atlasUV = frac(UV0) * VertexColor.b + VertexColor.rg
-					//                    finalColor = BaseColor * VertexColor.a (brightness multiplier)
 					//
 					// Axis orientation:  for each face axis d, u=(d+1)%3 and v=(d+2)%3.
 					//   d=0 (X face): u=Y (horiz), v=Z (vert)  → UV(u,v) correct as-is.
@@ -418,7 +408,7 @@ void AChunk::BuildGreedyMesh(
 							OutUVs.Add(FVector2D(0.f,      0.f      ));  // V3: Y=left,  Z=high
 						}
 
-						const FLinearColor TileColor(AU, AV, TileU, FaceBrightness);  // A = per-face brightness multiplier
+					const FLinearColor TileColor(AU, AV, TileU, 1.0f);  // A = 1.0 (full opacity)
 						OutColors.Add(TileColor);
 						OutColors.Add(TileColor);
 						OutColors.Add(TileColor);

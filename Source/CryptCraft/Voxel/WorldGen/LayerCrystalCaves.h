@@ -83,7 +83,7 @@ namespace CavernLayout
 {
 	/**
 	 * Determine which cavern layer is active for a given (X, Z) column.
-	 * Uses staggered checkerboard pattern to prevent vertical stacking.
+	 * Uses noise-based pattern.
 	 *
 	 * @param WorldSeed     The world's seed
 	 * @param WorldX        World X coordinate (in blocks)
@@ -91,6 +91,17 @@ namespace CavernLayout
 	 * @return              Upper or Lower layer for this column
 	 */
 	ECavernLayer GetLayerForColumn(uint32 WorldSeed, int32 WorldX, int32 WorldZ);
+
+	/**
+	 * Determine which cavern layer is active for a given grid CELL coordinate.
+	 * Uses discrete checkerboard pattern: adjacent cells always have different layers.
+	 * This prevents caverns from stacking directly on top of each other.
+	 *
+	 * @param CellX         Coarse grid X coordinate (cell index, not world blocks)
+	 * @param CellZ         Coarse grid Z coordinate (cell index)
+	 * @return              Upper or Lower layer for this cell (deterministic: same cell always returns same layer)
+	 */
+	ECavernLayer GetLayerForCell(int32 CellX, int32 CellZ);
 
 	/**
 	 * Query whether a cavern bubble exists at a coarse grid cell.
@@ -104,6 +115,25 @@ namespace CavernLayout
 	 * @return              Bubble info (bExists=false if no bubble at this cell)
 	 */
 	FCavernBubble GetBubbleAtCell(
+		uint32 WorldSeed,
+		int32 CellX,
+		int32 CellZ,
+		const FCavernLayerConfig& UpperConfig,
+		const FCavernLayerConfig& LowerConfig);
+
+	/**
+	 * Cached version of GetBubbleAtCell.
+	 * Uses a runtime hash map (GBubbleCellCache) to avoid redundant noise computation.
+	 * Safe to call multiple times for the same cell — subsequent calls are O(1) lookups.
+	 *
+	 * @param WorldSeed     The world's seed
+	 * @param CellX         Coarse grid X (cell coordinate, not world block coordinate)
+	 * @param CellZ         Coarse grid Z (cell coordinate)
+	 * @param UpperConfig   Configuration for upper cavern layer
+	 * @param LowerConfig   Configuration for lower cavern layer
+	 * @return              Bubble info (bExists=false if no bubble at this cell)
+	 */
+	FCavernBubble GetBubbleAtCellCached(
 		uint32 WorldSeed,
 		int32 CellX,
 		int32 CellZ,
@@ -149,6 +179,150 @@ namespace CavernLayout
 }
 
 // -----------------------------------------------------------------------
+//  Tunnel/Worm Path System (Step 3)
+// -----------------------------------------------------------------------
+
+/**
+ * Result of a worm spawn query at a coarse grid cell.
+ * Indicates whether a worm tunnel spawns at this cell, and its properties.
+ */
+struct FWormSpawn
+{
+	/** Does this cell have a worm tunnel? */
+	bool bExists = false;
+
+	/** Starting world position of the worm (only valid if bExists=true). */
+	FVector StartPosition = FVector::ZeroVector;
+
+	/** Starting direction (normalized) for the worm path (only valid if bExists=true). */
+	FVector StartDirection = FVector(1.0f, 0.0f, 0.0f);
+
+	/** Unique seed for this worm's path generation (only valid if bExists=true). */
+	uint32 WormSeed = 0;
+
+	/** Deterministically chosen target cavern for steering (only valid if bExists=true). */
+	FCavernBubble TargetCavern;
+};
+
+namespace TunnelWorms
+{
+	/**
+	 * Coarse worm-spawn grid cell size (blocks).
+	 * Each cell can have at most one worm spawning from it.
+	 * Larger = fewer, longer worms; smaller = more, shorter worms.
+	 */
+	static constexpr int32 WORM_GRID_CELL_SIZE = 256;
+
+	/**
+	 * Query whether a worm tunnel spawns at a coarse grid cell.
+	 * Returns full spawn info if a worm is placed there.
+	 *
+	 * @param WorldSeed     The world's seed
+	 * @param CellX         Coarse grid X (cell coordinate, not world block coordinate)
+	 * @param CellZ         Coarse grid Z (cell coordinate)
+	 * @param UpperConfig   Configuration for upper cavern layer
+	 * @param LowerConfig   Configuration for lower cavern layer
+	 * @return              Worm spawn info (bExists=false if no worm at this cell)
+	 */
+	FWormSpawn GetWormAtCell(
+		uint32 WorldSeed,
+		int32 CellX,
+		int32 CellZ,
+		const FCavernLayerConfig& UpperConfig,
+		const FCavernLayerConfig& LowerConfig);
+
+	/**
+	 * Cached version of GetWormAtCell.
+	 * Uses a runtime hash map (GWormCellCache) to avoid redundant noise computation.
+	 * Safe to call multiple times for the same cell — subsequent calls are O(1) lookups.
+	 *
+	 * @param WorldSeed     The world's seed
+	 * @param CellX         Coarse grid X (cell coordinate, not world block coordinate)
+	 * @param CellZ         Coarse grid Z (cell coordinate)
+	 * @param UpperConfig   Configuration for upper cavern layer
+	 * @param LowerConfig   Configuration for lower cavern layer
+	 * @return              Worm spawn info (bExists=false if no worm at this cell)
+	 */
+	FWormSpawn GetWormAtCellCached(
+		uint32 WorldSeed,
+		int32 CellX,
+		int32 CellZ,
+		const FCavernLayerConfig& UpperConfig,
+		const FCavernLayerConfig& LowerConfig);
+
+	/**
+	 * Calculate the worm's direction at a specific step along its path.
+	 * Blends wander noise (random walk) with steering toward target cavern.
+	 * Steering weight increases as worm approaches target.
+	 *
+	 * @param WormSeed      Unique seed for this worm
+	 * @param Step          Current step along the path (0 = start)
+	 * @param TargetCenter  World position of target cavern center
+	 * @param CurrentPos    Current position of the worm (for distance to target)
+	 * @param SteerWeight   How much to blend toward steering (0=wander only, 1=aim directly at target)
+	 * @return              Normalized direction vector
+	 */
+	FVector GetWormDirectionAtStep(
+		uint32 WormSeed,
+		int32 Step,
+		FVector TargetCenter,
+		FVector CurrentPos,
+		float SteerWeight = 0.3f);
+
+	/**
+	 * Calculate the worm's position at a specific step along its path.
+	 * Accumulates direction steps from the worm's starting position.
+	 * Fully deterministic: same inputs always produce same output.
+	 *
+	 * @param WormSeed      Unique seed for this worm
+	 * @param Step          Step number along the path (0 = start position)
+	 * @param StartPos      Starting world position of the worm
+	 * @param StartDir      Starting normalized direction
+	 * @param TargetCenter  Target cavern center (for steering)
+	 * @param StepLength    How many blocks per step to advance (default ~1.0)
+	 * @param MaxSteps      Stop accumulation at this step (safety limit)
+	 * @return              World position at the given step
+	 */
+	FVector GetWormPositionAtStep(
+		uint32 WormSeed,
+		int32 Step,
+		FVector StartPos,
+		FVector StartDir,
+		FVector TargetCenter,
+		float StepLength = 1.0f,
+		int32 MaxSteps = 1000);
+
+	/**
+	 * Get or build the full path for a worm tunnel.
+	 * Pre-computes all steps from start to max length, caches result.
+	 * Subsequent calls with the same worm return cached path (O(1)).
+	 * Safe to call once per chunk during GenerateChunk, then reuse for all voxel distance checks.
+	 *
+	 * @param Worm          The worm spawn info (must have bExists=true and valid TargetCavern)
+	 * @return              Reference to cached TArray<FVector> of path points
+	 */
+	const TArray<FVector>& GetOrBuildWormPath(const FWormSpawn& Worm);
+
+	/**
+	 * Debug visualization: render worm tunnel paths over a large area.
+	 *
+	 * @param CenterX        World X to center visualization around
+	 * @param CenterZ        World Z to center visualization around
+	 * @param AreaSize       Size of area to visualize (in blocks)
+	 * @param WorldSeed      World seed to use
+	 * @param UpperConfig    Upper layer config
+	 * @param LowerConfig    Lower layer config
+	 */
+	void DebugVisualizeWorms(
+		int32 CenterX,
+		int32 CenterZ,
+		int32 AreaSize,
+		uint32 WorldSeed,
+		const FCavernLayerConfig& UpperConfig,
+		const FCavernLayerConfig& LowerConfig);
+}
+
+// -----------------------------------------------------------------------
 //  Cavern Shape Carving (Step 2)
 // -----------------------------------------------------------------------
 
@@ -169,13 +343,15 @@ namespace CavernShape
 	 * @param WorldPos       World voxel position in blocks
 	 * @param UpperConfig    Configuration for upper cavern layer
 	 * @param LowerConfig    Configuration for lower cavern layer
+	 * @param PreFetchedCaverns  Array of nearby caverns (pre-computed once per chunk, not per-voxel)
 	 * @return               true = air (carved), false = stone
 	 */
 	bool IsCavernVoxel(
 		int32 WorldSeed,
 		FIntVector WorldPos,
 		const FCavernLayerConfig& UpperConfig,
-		const FCavernLayerConfig& LowerConfig);
+		const FCavernLayerConfig& LowerConfig,
+		const TArray<FCavernBubble>& PreFetchedCaverns);
 }
 
 // -----------------------------------------------------------------------
