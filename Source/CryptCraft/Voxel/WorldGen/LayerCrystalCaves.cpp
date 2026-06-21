@@ -541,8 +541,14 @@ namespace TunnelWorms
 		Result.bExists = true;
 		Result.WormSeed = CellSeed;
 
-		// Pick a layer for the worm using discrete checkerboard (same as caverns)
-		const ECavernLayer Layer = CavernLayout::GetLayerForCell(CellX, CellZ);
+		// Pick a layer for the worm using discrete checkerboard.
+		// CRITICAL FIX: Convert worm-grid cell coords to cavern-grid cell coords
+		// so both systems agree on layer assignment for any given world position.
+		// Worm grid = 256-block cells, Cavern grid = 128-block cells.
+		// Use the worm cell's center world position to determine its cavern grid layer.
+		const int32 CavernCellX = FMath::FloorToInt(CellCenterX / 128.0f);  // CAVERN_GRID_CELL_SIZE = 128
+		const int32 CavernCellZ = FMath::FloorToInt(CellCenterZ / 128.0f);
+		const ECavernLayer Layer = CavernLayout::GetLayerForCell(CavernCellX, CavernCellZ);
 		const FCavernLayerConfig& LayerConfig = (Layer == ECavernLayer::Upper) ? UpperConfig : LowerConfig;
 
 		// Random starting position within the cell with some offset
@@ -857,6 +863,18 @@ void FCrystalCavesLevelGenerator::GenerateChunk(
 	int32 GlobalChunkY,
 	int32 LocalChunkZ)
 {
+	// ===== DIAGNOSTIC: GenerateChunk call logging =====
+	// Track how many chunks are being generated, in what range, and how long they take.
+	// If freeze occurs, force-close and check Saved/Logs/CryptCraft.log to see call count/range.
+	static int32 GenerateChunkCallCount = 0;
+	GenerateChunkCallCount++;
+	static double FirstCallTime = 0.0;
+	if (FirstCallTime == 0.0) FirstCallTime = FPlatformTime::Seconds();
+	
+	const double ElapsedSeconds = FPlatformTime::Seconds() - FirstCallTime;
+	UE_LOG(LogTemp, Warning, TEXT("GenerateChunk call #%d: [%d,%d,%d] (elapsed: %.2fs)"),
+		GenerateChunkCallCount, GlobalChunkX, GlobalChunkY, LocalChunkZ, ElapsedSeconds);
+
 	TArray<EBlockType> OutBlocks;
 
 	// ---- Open air top (LocalChunkZ 0) for faster traversal ----
@@ -893,6 +911,9 @@ void FCrystalCavesLevelGenerator::GenerateChunk(
 		LowerConfig.TunnelBaseAltitude = -32;
 
 		uint32 WorldSeed = 12345; // TODO: Get from world/game mode
+
+		// ===== DIAGNOSTIC TIMING LOGGING START =====
+		const double PrefetchStartTime = FPlatformTime::Seconds();
 
 		// -----------------------------------------------------------
 		// PREFETCH (once per chunk, NOT per voxel):
@@ -943,8 +964,13 @@ void FCrystalCavesLevelGenerator::GenerateChunk(
 			}
 		}
 
+		const double PrefetchEndTime = FPlatformTime::Seconds();
+		const double PrefetchTime = (PrefetchEndTime - PrefetchStartTime) * 1000.0; // ms
+
 		int32 CavernVoxelCount = 0;
 		int32 TunnelVoxelCount = 0;
+
+		const double VoxelLoopStartTime = FPlatformTime::Seconds();
 
 		for (int32 X = 0; X < CHUNK_SIZE_X; ++X)
 		{
@@ -971,6 +997,11 @@ void FCrystalCavesLevelGenerator::GenerateChunk(
 					}
 
 					bool bIsTunnel = false;
+					// ===== DIAGNOSTIC: TUNNEL CARVING DISABLED =====
+					// Temporarily disabling tunnel carving to isolate freeze cause.
+					// If freeze disappears with this disabled, tunnels are the bottleneck (16,384 voxels × 3 worms × 501 path points = 24M distance checks per chunk).
+					// Re-enable after applying bounding-box fix below.
+					/*
 					if (!bIsCavern)
 					{
 						// Cheap: distance check against pre-fetched, pre-built
@@ -982,6 +1013,7 @@ void FCrystalCavesLevelGenerator::GenerateChunk(
 							TunnelVoxelCount++;
 						}
 					}
+					*/
 
 					const EBlockType BlockType = (bIsCavern || bIsTunnel)
 						? EBlockType::Air
@@ -991,7 +1023,17 @@ void FCrystalCavesLevelGenerator::GenerateChunk(
 			}
 		}
 
-		if ((CavernVoxelCount > 0 || TunnelVoxelCount > 0) && (GlobalChunkX % 4 == 0 && GlobalChunkY % 4 == 0))
+		const double VoxelLoopEndTime = FPlatformTime::Seconds();
+		const double VoxelLoopTime = (VoxelLoopEndTime - VoxelLoopStartTime) * 1000.0; // ms
+
+		// Log detailed timing and counts for diagnostics
+		UE_LOG(LogTemp, Warning, TEXT("Chunk [%d,%d,%d] Timings: Prefetch=%.2fms, VoxelLoop=%.2fms | Caverns=%d Worms=%d CavernVoxels=%d TunnelVoxels=%d"),
+			GlobalChunkX, GlobalChunkY, LocalChunkZ,
+			PrefetchTime, VoxelLoopTime,
+			ChunkNearbyCaverns.Num(), ChunkNearbyWorms.Num(),
+			CavernVoxelCount, TunnelVoxelCount);
+
+		// ===== DIAGNOSTIC TIMING LOGGING END =====
 		{
 			UE_LOG(LogTemp, Warning, TEXT("CavernChunk [%d,%d,%d]: Carved %d cavern voxels, %d tunnel voxels"),
 				GlobalChunkX, GlobalChunkY, LocalChunkZ, CavernVoxelCount, TunnelVoxelCount);
