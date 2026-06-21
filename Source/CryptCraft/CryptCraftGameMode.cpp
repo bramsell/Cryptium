@@ -21,6 +21,7 @@ void ACryptCraftGameMode::BeginPlay()
 
 	AVoxelWorld* World = EnsureVoxelWorld();
 	EnsureDirectionalLight();
+	EnsureSkyAtmosphere();
 	EnsureSkyLight();
 
 	// Calculate and cache where we want the player to stand.
@@ -121,81 +122,42 @@ void ACryptCraftGameMode::TeleportPlayersToSurface()
 
 // ---------------------------------------------------------------------------
 
+void ACryptCraftGameMode::EnsureSkyAtmosphere()
+{
+	// Spawn SkyAtmosphere for blue sky appearance
+	for (TActorIterator<AActor> It(GetWorld()); It; ++It)
+	{
+		if (*It && (*It)->GetClass()->GetName() == TEXT("SkyAtmosphere"))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("CryptCraftGameMode: SkyAtmosphere already exists, skipping spawn."));
+			return;
+		}
+	}
+
+	UClass* SkyAtmoClass = LoadClass<AActor>(nullptr, TEXT("/Script/Engine.SkyAtmosphere"));
+	if (SkyAtmoClass)
+	{
+		AActor* SkyAtmo = GetWorld()->SpawnActor(SkyAtmoClass);
+		if (SkyAtmo)
+		{
+			UE_LOG(LogTemp, Log, TEXT("CryptCraftGameMode: Spawned SkyAtmosphere."));
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("CryptCraftGameMode: Failed to spawn SkyAtmosphere actor."));
+		}
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("CryptCraftGameMode: Could not load SkyAtmosphere class."));
+	}
+}
+
+// ---------------------------------------------------------------------------
+
 void ACryptCraftGameMode::EnsureSkyLight()
 {
-	// Re-purpose this as a fill/ambient light using a second directional light.
-	// A SkyLight would require a sky capture (which comes out black with no skybox).
-	// A shadowless directional light reliably reaches every surface including
-	// underground cave walls without needing any scene capture.
-
-	// Skip if a fill light was already spawned.
-	for (TActorIterator<ADirectionalLight> It(GetWorld()); It; ++It)
-	{
-		// Only skip if we find more than one – the first is the sun.
-		ADirectionalLight* L = *It;
-		if (L && L->GetName().Contains(TEXT("AutoFill")))
-			return;
-	}
-
-	FActorSpawnParameters Params;
-	Params.Name = TEXT("AutoFillLight");
-
-	// Come from the opposite hemisphere to the sun so every face gets
-	// at least some contribution. Pitch > 0 means pointing upward-ish,
-	// which lights ceilings and the underside of terrain.
-	const FRotator FillRotation(-160.f, 225.f, 0.f);
-
-	ADirectionalLight* Fill = GetWorld()->SpawnActor<ADirectionalLight>(
-		ADirectionalLight::StaticClass(),
-		FVector::ZeroVector,
-		FillRotation,
-		Params
-	);
-
-	if (!Fill)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("CryptCraftGameMode: Failed to spawn fill light."));
-		return;
-	}
-
-	if (UDirectionalLightComponent* LC = Cast<UDirectionalLightComponent>(Fill->GetLightComponent()))
-	{
-		// Low intensity – just enough to see in a cave, not enough to wash
-		// out outdoor surfaces.
-		LC->SetIntensity(0.15f);
-		LC->SetLightColor(FLinearColor(0.55f, 0.65f, 0.9f));  // cool blue-grey tint
-
-		// NO shadows – this must penetrate underground and into caves.
-		LC->SetCastShadows(false);
-
-		// Don't let this light interact with the atmosphere.
-		LC->SetAtmosphereSunLight(false);
-
-		// Explicitly yield to the sun so there is no ambiguity about which
-		// directional light drives forward shading / translucency / fog.
-		LC->ForwardShadingPriority = 0;
-		LC->MarkRenderStateDirty();
-	}
-
-	UE_LOG(LogTemp, Log, TEXT("CryptCraftGameMode: Auto-spawned fill light."));
-
-	// =========================================================================
-	// SKYATMOSPHERE: Required for SkyLight real-time capture to work
-	// =========================================================================
-
-	// TODO: SkyAtmosphere spawn temporarily disabled until correct header is identified
-	// For now, rely on environment's existing sky or create via Blueprint
-	//
-	// ASkyAtmosphere should be present in the level for SkyLight real-time capture
-	// to work properly. If you see "SkyLight with real-time capture requires SkyAtmosphere"
-	// warning, add a SkyAtmosphere actor to the level or implement spawn here.
-
-	// =========================================================================
-	// SKYLIGHT: Add a SkyLight for better ambient cave illumination
-	// =========================================================================
-
-	UE_LOG(LogTemp, Warning, TEXT("CryptCraftGameMode: === Starting SkyLight spawn process ==="));
-
+	// Spawn a SkyLight for ambient cave illumination
 	// Check if SkyLight already exists
 	for (TActorIterator<ASkyLight> It(GetWorld()); It; ++It)
 	{
@@ -248,9 +210,8 @@ void ACryptCraftGameMode::EnsureSkyLight()
 	// Mark for update and rendering
 	SkyLC->MarkRenderStateDirty();
 	SkyLight->UpdateComponentTransforms();
-	UE_LOG(LogTemp, Warning, TEXT("CryptCraftGameMode: Marked render state dirty and updated transforms"));
 
-	UE_LOG(LogTemp, Warning, TEXT("CryptCraftGameMode: Auto-spawned SkyLight for cave ambient lighting."));
+	UE_LOG(LogTemp, Warning, TEXT("CryptCraftGameMode: === SkyLight spawn complete ==="));
 }
 
 void ACryptCraftGameMode::EnsureDirectionalLight()

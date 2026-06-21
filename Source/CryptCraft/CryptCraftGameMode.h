@@ -54,6 +54,7 @@ protected:
 private:
 	AVoxelWorld* EnsureVoxelWorld();
 	void EnsureDirectionalLight();
+	void EnsureSkyAtmosphere();
 	void EnsureSkyLight();
 
 	/**
@@ -67,6 +68,5 @@ private:
 	/** Cached spawn location set during BeginPlay for use in the deferred call. */
 	FVector PendingSpawnLocation = FVector::ZeroVector;
 };
-
 
 
