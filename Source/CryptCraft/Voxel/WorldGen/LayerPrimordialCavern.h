@@ -16,6 +16,12 @@ class AChunk;
 class CRYPTCRAFT_API FPrimordialCavernLevelGenerator : public ILevelGenerator
 {
 public:
+	virtual void GenerateBlocks(
+		int32 GlobalChunkX,
+		int32 GlobalChunkY,
+		int32 LocalChunkZ,
+		TArray<EBlockType>& OutBlocks) override;
+
 	virtual void GenerateChunk(
 		AChunk& Chunk,
 		int32 GlobalChunkX,

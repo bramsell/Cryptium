@@ -2,6 +2,7 @@
 
 #include "VoxelWorld.h"
 #include "Chunk.h"
+#include "Async/Async.h"
 #include "Engine/Texture2D.h"
 #include "Engine/DirectionalLight.h"
 #include "Components/DirectionalLightComponent.h"
@@ -662,13 +663,30 @@ void AVoxelWorld::UpdateStreamingPosition(FVector WorldPosition)
 		}
 	}
 
-	// Load newly visible chunks
+	// Load newly visible chunks (skip coords already loaded or in-flight)
 	for (const FIntVector& Coord : Desired)
 	{
-		if (!LoadedChunks.Contains(Coord))
+		if (!LoadedChunks.Contains(Coord) && !PendingChunkActors.Contains(Coord))
 		{
 			LoadChunk(Coord);
 		}
+	}
+
+	// Cancel and unload out-of-range pending chunks
+	TArray<FIntVector> PendingToCancel;
+	for (const auto& Pair : PendingChunkActors)
+	{
+		FIntVector Delta = Pair.Key - PlayerChunk;
+		if (FMath::Abs(Delta.X) > RenderDistance + 2 ||
+			FMath::Abs(Delta.Y) > RenderDistance + 2 ||
+			FMath::Abs(Delta.Z) > VerticalRenderDistance + 2)
+		{
+			PendingToCancel.Add(Pair.Key);
+		}
+	}
+	for (const FIntVector& Coord : PendingToCancel)
+	{
+		UnloadChunk(Coord);
 	}
 
 	// Unload out-of-range chunks (add 2 as hysteresis to avoid churn)
@@ -743,8 +761,7 @@ void AVoxelWorld::GenerateFlatChunkData(FIntVector Coord, TArray<EBlockType>& Ou
 
 void AVoxelWorld::LoadChunk(FIntVector Coord)
 {
-	// Spawn chunk actor first, then fill it with generated block data.
-	// Generators receive the spawned chunk and call Initialize() internally.
+	// Spawn the actor on the game thread (UObject creation requirement).
 	const FVector WorldPos(
 		static_cast<float>(Coord.X) * CHUNK_SIZE_X * BLOCK_SIZE,
 		static_cast<float>(Coord.Y) * CHUNK_SIZE_Y * BLOCK_SIZE,
@@ -759,36 +776,93 @@ void AVoxelWorld::LoadChunk(FIntVector Coord)
 
 	NewChunk->ChunkCoord        = Coord;
 	NewChunk->VoxelWorld        = this;
-	// Flat worlds need sync collision for proper setup
 	NewChunk->bUseSyncCollision = (WorldGenType == EWorldGenType::Flat);
 
 	if (WorldGenType == EWorldGenType::Flat)
 	{
+		// Flat world is pre-loaded at startup — keep it synchronous.
 		TArray<EBlockType> Blocks;
 		GenerateFlatChunkData(Coord, Blocks);
 		NewChunk->Initialize(Blocks);
+		LoadedChunks.Add(Coord, NewChunk);
+
+		const FIntVector Offsets[] = {
+			{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}
+		};
+		for (const FIntVector& Off : Offsets)
+		{
+			TObjectPtr<AChunk>* Neighbor = LoadedChunks.Find(Coord + Off);
+			if (Neighbor && *Neighbor) (*Neighbor)->RebuildMesh();
+		}
 	}
 	else
 	{
-		// Route to the correct level generator; Initialize() is called inside.
-		WorldGenManager->RouteChunkGeneration(*NewChunk, Coord.X, Coord.Y, Coord.Z);
-	}
+		// Terrain: run noise generation on a background thread to avoid
+		// stalling the game thread when the player crosses a chunk boundary.
+		// The actor is tracked in PendingChunkActors (UPROPERTY, GC-safe)
+		// until the game-thread callback moves it into LoadedChunks.
+		PendingChunkActors.Add(Coord, NewChunk);
 
-	LoadedChunks.Add(Coord, NewChunk);
+		TWeakObjectPtr<AChunk>      WeakChunk(NewChunk);
+		TWeakObjectPtr<AVoxelWorld> WeakWorld(this);
+		TSharedPtr<FWorldGenerationManager> GenManager = WorldGenManager;
+		// Capture coord as value — the lambda outlives this stack frame.
+		const FIntVector CapturedCoord = Coord;
 
-	// Ask border neighbors to rebuild so shared-boundary faces are correct
-	const FIntVector Offsets[] = {
-		{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}
-	};
-	for (const FIntVector& Off : Offsets)
-	{
-		TObjectPtr<AChunk>* Neighbor = LoadedChunks.Find(Coord + Off);
-		if (Neighbor && *Neighbor) (*Neighbor)->RebuildMesh();
+		AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
+		[WeakChunk, WeakWorld, CapturedCoord, GenManager]()
+		{
+			// ---- Background thread: pure computation, no UObject access ----
+			TArray<EBlockType> OutBlocks;
+			GenManager->RouteBlockGeneration(
+				CapturedCoord.X, CapturedCoord.Y, CapturedCoord.Z, OutBlocks);
+
+			// Marshal the result back to the game thread.
+			AsyncTask(ENamedThreads::GameThread,
+			[WeakChunk, WeakWorld, CapturedCoord, Blocks = MoveTemp(OutBlocks)]() mutable
+			{
+				// ---- Game thread: all UObject access here ----
+				AVoxelWorld* World = WeakWorld.Get();
+				AChunk*      Chunk = WeakChunk.Get();
+
+				// Bail if the world was destroyed or the chunk was cancelled
+				// (UnloadChunk removed it from PendingChunkActors).
+				if (!World || !Chunk || !World->PendingChunkActors.Contains(CapturedCoord))
+				{
+					if (Chunk) Chunk->Destroy();
+					return;
+				}
+
+				World->PendingChunkActors.Remove(CapturedCoord);
+				Chunk->Initialize(Blocks);
+				World->LoadedChunks.Add(CapturedCoord, Chunk);
+
+				// Rebuild border neighbors so shared boundary faces are correct.
+				static const FIntVector Offsets[] = {
+					{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}
+				};
+				for (const FIntVector& Off : Offsets)
+				{
+					TObjectPtr<AChunk>* Neighbor = World->LoadedChunks.Find(CapturedCoord + Off);
+					if (Neighbor && *Neighbor) (*Neighbor)->RebuildMesh();
+				}
+			});
+		});
 	}
 }
 
 void AVoxelWorld::UnloadChunk(FIntVector Coord)
 {
+	// If the chunk is still being generated, cancel it: remove from
+	// PendingChunkActors so the game-thread callback sees it's gone,
+	// then destroy the already-spawned actor.
+	if (TObjectPtr<AChunk>* Pending = PendingChunkActors.Find(Coord))
+	{
+		if (*Pending) (*Pending)->Destroy();
+		PendingChunkActors.Remove(Coord);
+		return;
+	}
+
 	TObjectPtr<AChunk>* Found = LoadedChunks.Find(Coord);
 	if (!Found || !(*Found)) return;
 

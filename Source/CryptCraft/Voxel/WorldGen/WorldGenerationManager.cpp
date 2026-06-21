@@ -91,6 +91,26 @@ int32 FWorldGenerationManager::GetLocalChunkZ(int32 GlobalChunkZ) const
 //  Routing
 // ---------------------------------------------------------------------------
 
+void FWorldGenerationManager::RouteBlockGeneration(
+	int32 GlobalChunkX,
+	int32 GlobalChunkY,
+	int32 GlobalChunkZ,
+	TArray<EBlockType>& OutBlocks) const
+{
+	int32 LevelIndex, LocalChunkZ;
+	const bool bFound = ResolveChunkZ(GlobalChunkZ, LevelIndex, LocalChunkZ);
+
+	if (bFound)
+	{
+		Levels[LevelIndex]->GenerateBlocks(GlobalChunkX, GlobalChunkY, LocalChunkZ, OutBlocks);
+	}
+	else
+	{
+		// Below all registered levels — solid bedrock as a safe fallback
+		OutBlocks.Init(EBlockType::Bedrock, CHUNK_SIZE_X * CHUNK_SIZE_Y * CHUNK_SIZE_Z);
+	}
+}
+
 void FWorldGenerationManager::RouteChunkGeneration(
 	AChunk& Chunk,
 	int32 GlobalChunkX,

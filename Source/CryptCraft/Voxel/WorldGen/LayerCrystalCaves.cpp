@@ -854,14 +854,14 @@ static constexpr int32 FLOOR_FRINGE_Z   = 6;
 static constexpr int32 FLOOR_SOLID_Z    = 7;
 
 // ---------------------------------------------------------------------------
-//  GenerateChunk
+//  GenerateBlocks / GenerateChunk
 // ---------------------------------------------------------------------------
 
-void FCrystalCavesLevelGenerator::GenerateChunk(
-	AChunk& Chunk,
+void FCrystalCavesLevelGenerator::GenerateBlocks(
 	int32 GlobalChunkX,
 	int32 GlobalChunkY,
-	int32 LocalChunkZ)
+	int32 LocalChunkZ,
+	TArray<EBlockType>& OutBlocks)
 {
 	// ===== DIAGNOSTIC: GenerateChunk call logging =====
 	// Track how many chunks are being generated, in what range, and how long they take.
@@ -875,13 +875,10 @@ void FCrystalCavesLevelGenerator::GenerateChunk(
 	UE_LOG(LogTemp, Warning, TEXT("GenerateChunk call #%d: [%d,%d,%d] (elapsed: %.2fs)"),
 		GenerateChunkCallCount, GlobalChunkX, GlobalChunkY, LocalChunkZ, ElapsedSeconds);
 
-	TArray<EBlockType> OutBlocks;
-
 	// ---- Open air top (LocalChunkZ 0) for faster traversal ----
 	if (LocalChunkZ == 0)
 	{
 		OutBlocks.Init(EBlockType::Air, CHUNK_SIZE_X * CHUNK_SIZE_Y * CHUNK_SIZE_Z);
-		Chunk.Initialize(OutBlocks);
 		return;
 	}
 
@@ -889,7 +886,6 @@ void FCrystalCavesLevelGenerator::GenerateChunk(
 	if (LocalChunkZ == CEILING_SOLID_Z || LocalChunkZ == FLOOR_SOLID_Z)
 	{
 		OutBlocks.Init(EBlockType::Stone, CHUNK_SIZE_X * CHUNK_SIZE_Y * CHUNK_SIZE_Z);
-		Chunk.Initialize(OutBlocks);
 		return;
 	}
 
@@ -1039,7 +1035,6 @@ void FCrystalCavesLevelGenerator::GenerateChunk(
 				GlobalChunkX, GlobalChunkY, LocalChunkZ, CavernVoxelCount, TunnelVoxelCount);
 		}
 
-		Chunk.Initialize(OutBlocks);
 		return;
 	}
 
@@ -1075,5 +1070,15 @@ void FCrystalCavesLevelGenerator::GenerateChunk(
 		}
 	}
 
-	Chunk.Initialize(OutBlocks);
+}
+
+void FCrystalCavesLevelGenerator::GenerateChunk(
+	AChunk& Chunk,
+	int32 GlobalChunkX,
+	int32 GlobalChunkY,
+	int32 LocalChunkZ)
+{
+	TArray<EBlockType> Blocks;
+	GenerateBlocks(GlobalChunkX, GlobalChunkY, LocalChunkZ, Blocks);
+	Chunk.Initialize(Blocks);
 }

@@ -112,16 +112,15 @@ float FSurfaceLevelGenerator::SampleHeight(float WX, float WY)
 	return (Value / Total) * 0.5f + 0.5f;   // remap -1..1 → 0..1
 }
 
-void FSurfaceLevelGenerator::GenerateChunk(
-	AChunk& Chunk,
+void FSurfaceLevelGenerator::GenerateBlocks(
 	int32 GlobalChunkX,
 	int32 GlobalChunkY,
-	int32 LocalChunkZ)
+	int32 LocalChunkZ,
+	TArray<EBlockType>& OutBlocks)
 {
 	// For Level 0 (surface), LocalChunkZ == GlobalChunkZ — no transformation needed.
 	const FIntVector ChunkCoord(GlobalChunkX, GlobalChunkY, LocalChunkZ);
 
-	TArray<EBlockType> OutBlocks;
 	OutBlocks.SetNum(CHUNK_SIZE_X * CHUNK_SIZE_Y * CHUNK_SIZE_Z);
 
 	const int32 DirtTopOffset = 1;          // grass is 1 above dirt band
@@ -154,7 +153,17 @@ void FSurfaceLevelGenerator::GenerateChunk(
 	}
 
 	PlaceSurfaceObjects(ChunkCoord, OutBlocks);
-	Chunk.Initialize(OutBlocks);
+}
+
+void FSurfaceLevelGenerator::GenerateChunk(
+	AChunk& Chunk,
+	int32 GlobalChunkX,
+	int32 GlobalChunkY,
+	int32 LocalChunkZ)
+{
+	TArray<EBlockType> Blocks;
+	GenerateBlocks(GlobalChunkX, GlobalChunkY, LocalChunkZ, Blocks);
+	Chunk.Initialize(Blocks);
 }
 
 // ---------------------------------------------------------------------------

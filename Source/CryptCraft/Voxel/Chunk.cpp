@@ -3,6 +3,7 @@
 #include "Chunk.h"
 #include "VoxelWorld.h"
 #include "ProceduralMeshComponent.h"
+#include "Async/Async.h"
 
 // ---------------------------------------------------------------------------
 AChunk::AChunk()
@@ -106,71 +107,147 @@ void AChunk::RebuildMesh()
 		}
 	}
 
-	TArray<FVector>       Vertices;
-	TArray<int32>         Triangles;
-	TArray<FVector>       Normals;
-	TArray<FVector2D>     UVs;
-	TArray<FLinearColor>  Colors;
+	// Snapshot all required data on the game thread.
+	// The snapshot holds no live UObject pointers so it is safe to capture
+	// into the background lambda.
+	FChunkMeshSnapshot Snap = BuildMeshSnapshot();
 
-	BuildGreedyMesh(Vertices, Triangles, Normals, UVs, Colors);
+	TWeakObjectPtr<AChunk> WeakThis(this);
+	const bool bSyncCol = bUseSyncCollision;
 
-	// Sync cooking: collision is ready immediately (used for flat / pre-loaded worlds).
-	// Async cooking: collision is built on a worker thread (used for streamed terrain).
-	ProceduralMesh->bUseAsyncCooking = !bUseSyncCollision;
-
-	// Use the LinearColor overload so atlas UV offsets have full float precision.
-	TArray<FProcMeshTangent> Tangents;
-	ProceduralMesh->CreateMeshSection_LinearColor(0, Vertices, Triangles, Normals, UVs,
-	                                              Colors, Tangents, /*bCreateCollision=*/true);
-
-	// Apply the chunk material if the world has one set
-	if (VoxelWorld)
+	AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
+		[Snap = MoveTemp(Snap), WeakThis, bSyncCol]() mutable
 	{
-		UMaterialInterface* Mat = VoxelWorld->GetChunkMaterial();
-		if (Mat)
+		TArray<FVector>      Verts;
+		TArray<int32>        Tris;
+		TArray<FVector>      Norms;
+		TArray<FVector2D>    UVs;
+		TArray<FLinearColor> Colors;
+
+		AChunk::BuildGreedyMeshFromSnapshot(Snap, Verts, Tris, Norms, UVs, Colors);
+
+		AsyncTask(ENamedThreads::GameThread,
+			[WeakThis, bSyncCol,
+			 Verts   = MoveTemp(Verts),
+			 Tris    = MoveTemp(Tris),
+			 Norms   = MoveTemp(Norms),
+			 UVs     = MoveTemp(UVs),
+			 Colors  = MoveTemp(Colors)]() mutable
 		{
-			ProceduralMesh->SetMaterial(0, Mat);
+			AChunk* Chunk = WeakThis.Get();
+			if (!IsValid(Chunk)) return;
+
+			Chunk->ProceduralMesh->bUseAsyncCooking = !bSyncCol;
+			TArray<FProcMeshTangent> Tangents;
+			Chunk->ProceduralMesh->CreateMeshSection_LinearColor(
+				0, Verts, Tris, Norms, UVs, Colors, Tangents, /*bCreateCollision=*/true);
+
+			if (Chunk->VoxelWorld)
+			{
+				if (UMaterialInterface* Mat = Chunk->VoxelWorld->GetChunkMaterial())
+					Chunk->ProceduralMesh->SetMaterial(0, Mat);
+			}
+		});
+	});
+}
+
+// ---------------------------------------------------------------------------
+//  Snapshot builder  (game thread only)
+// ---------------------------------------------------------------------------
+
+FChunkMeshSnapshot AChunk::BuildMeshSnapshot() const
+{
+	FChunkMeshSnapshot Snap;
+
+	// Own block data — treat the live-coding re-instancing case (empty Blocks,
+	// bIsUniform==false) the same as a genuine uniform chunk.
+	if (bIsUniform || Blocks.Num() == 0)
+	{
+		Snap.bOwnIsUniform  = true;
+		Snap.OwnUniformType = UniformBlockType;
+	}
+	else
+	{
+		Snap.OwnBlocks = Blocks;
+	}
+
+	if (!VoxelWorld) return Snap;
+
+	// -----------------------------------------------------------------------
+	//  6 neighbor face slices
+	//  [0]=+X, [1]=-X, [2]=+Y, [3]=-Y, [4]=+Z, [5]=-Z
+	//  For each direction, sample the one face of the neighbor that is adjacent
+	//  to this chunk.  An absent (unloaded) neighbor leaves an empty array.
+	// -----------------------------------------------------------------------
+	static const FIntVector Dirs[6] = {
+		{ 1, 0, 0}, {-1, 0, 0},
+		{ 0, 1, 0}, { 0,-1, 0},
+		{ 0, 0, 1}, { 0, 0,-1}
+	};
+
+	for (int32 Dir = 0; Dir < 6; ++Dir)
+	{
+		AChunk* N = VoxelWorld->GetChunkAt(ChunkCoord + Dirs[Dir]);
+		if (!N) continue;
+
+		TArray<EBlockType>& Face = Snap.NeighborFaces[Dir];
+		switch (Dir)
+		{
+		case 0: // +X neighbor — sample its X=0 face
+			Face.SetNumUninitialized(CHUNK_SIZE_Y * CHUNK_SIZE_Z);
+			for (int32 Z = 0; Z < CHUNK_SIZE_Z; ++Z)
+				for (int32 Y = 0; Y < CHUNK_SIZE_Y; ++Y)
+					Face[Y + CHUNK_SIZE_Y * Z] = N->GetBlock(0, Y, Z);
+			break;
+
+		case 1: // -X neighbor — sample its X=CHUNK_SIZE_X-1 face
+			Face.SetNumUninitialized(CHUNK_SIZE_Y * CHUNK_SIZE_Z);
+			for (int32 Z = 0; Z < CHUNK_SIZE_Z; ++Z)
+				for (int32 Y = 0; Y < CHUNK_SIZE_Y; ++Y)
+					Face[Y + CHUNK_SIZE_Y * Z] = N->GetBlock(CHUNK_SIZE_X - 1, Y, Z);
+			break;
+
+		case 2: // +Y neighbor — sample its Y=0 face
+			Face.SetNumUninitialized(CHUNK_SIZE_X * CHUNK_SIZE_Z);
+			for (int32 Z = 0; Z < CHUNK_SIZE_Z; ++Z)
+				for (int32 X = 0; X < CHUNK_SIZE_X; ++X)
+					Face[X + CHUNK_SIZE_X * Z] = N->GetBlock(X, 0, Z);
+			break;
+
+		case 3: // -Y neighbor — sample its Y=CHUNK_SIZE_Y-1 face
+			Face.SetNumUninitialized(CHUNK_SIZE_X * CHUNK_SIZE_Z);
+			for (int32 Z = 0; Z < CHUNK_SIZE_Z; ++Z)
+				for (int32 X = 0; X < CHUNK_SIZE_X; ++X)
+					Face[X + CHUNK_SIZE_X * Z] = N->GetBlock(X, CHUNK_SIZE_Y - 1, Z);
+			break;
+
+		case 4: // +Z neighbor — sample its Z=0 face
+			Face.SetNumUninitialized(CHUNK_SIZE_X * CHUNK_SIZE_Y);
+			for (int32 Y = 0; Y < CHUNK_SIZE_Y; ++Y)
+				for (int32 X = 0; X < CHUNK_SIZE_X; ++X)
+					Face[X + CHUNK_SIZE_X * Y] = N->GetBlock(X, Y, 0);
+			break;
+
+		case 5: // -Z neighbor — sample its Z=CHUNK_SIZE_Z-1 face
+			Face.SetNumUninitialized(CHUNK_SIZE_X * CHUNK_SIZE_Y);
+			for (int32 Y = 0; Y < CHUNK_SIZE_Y; ++Y)
+				for (int32 X = 0; X < CHUNK_SIZE_X; ++X)
+					Face[X + CHUNK_SIZE_X * Y] = N->GetBlock(X, Y, CHUNK_SIZE_Z - 1);
+			break;
 		}
 	}
+
+	// World rendering constants (value-copied — no live UObject references)
+	Snap.BlockDefs         = VoxelWorld->BlockDefinitions;
+	Snap.TileIndexMap      = VoxelWorld->GetTileIndexMap();
+	Snap.AtlasCols         = VoxelWorld->GetAtlasCols();
+	Snap.SunDirection      = VoxelWorld->GetSunDirection();
+	Snap.MinimumBrightness = VoxelWorld->MinimumBrightness;
+	return Snap;
 }
 
 // ---------------------------------------------------------------------------
-//  Neighbor sampling
-// ---------------------------------------------------------------------------
-
-EBlockType AChunk::GetBlockWithNeighbors(int32 X, int32 Y, int32 Z) const
-{
-	// Local block
-	if (X >= 0 && X < CHUNK_SIZE_X &&
-		Y >= 0 && Y < CHUNK_SIZE_Y &&
-		Z >= 0 && Z < CHUNK_SIZE_Z)
-	{
-		return GetBlock(X, Y, Z);
-	}
-
-	// Query the owning world for out-of-bounds positions
-	if (!VoxelWorld) return EBlockType::Air;
-
-	// Convert local voxel → world voxel
-	FIntVector WorldVoxel(
-		ChunkCoord.X * CHUNK_SIZE_X + X,
-		ChunkCoord.Y * CHUNK_SIZE_Y + Y,
-		ChunkCoord.Z * CHUNK_SIZE_Z + Z
-	);
-	return VoxelWorld->GetBlockAt(WorldVoxel);
-}
-
-bool AChunk::IsBlockOpaque(int32 X, int32 Y, int32 Z) const
-{
-	EBlockType Type = GetBlockWithNeighbors(X, Y, Z);
-	if (Type == EBlockType::Air) return false;
-	if (!VoxelWorld) return true;
-	return VoxelWorld->GetBlockDefinition(Type).bIsOpaque;
-}
-
-// ---------------------------------------------------------------------------
-//  Greedy meshing
-// ---------------------------------------------------------------------------
+//  Greedy meshing  (background-thread-safe — reads snapshot only)
 //
 //  For each of the 3 axes (d), and each slice along that axis, a 2D face mask
 //  is built.  Runs of identical face values are merged into the largest
@@ -185,17 +262,49 @@ bool AChunk::IsBlockOpaque(int32 X, int32 Y, int32 Z) const
 //        u=(d+1)%3, v=(d+2)%3  (the two axes spanning the quad)
 // ---------------------------------------------------------------------------
 
-void AChunk::BuildGreedyMesh(
-	TArray<FVector>&       OutVertices,
-	TArray<int32>&         OutTriangles,
-	TArray<FVector>&       OutNormals,
-	TArray<FVector2D>&     OutUVs,
-	TArray<FLinearColor>&  OutColors)
+void AChunk::BuildGreedyMeshFromSnapshot(
+	const FChunkMeshSnapshot& Snap,
+	TArray<FVector>&          OutVertices,
+	TArray<int32>&            OutTriangles,
+	TArray<FVector>&          OutNormals,
+	TArray<FVector2D>&        OutUVs,
+	TArray<FLinearColor>&     OutColors)
 {
+	// -----------------------------------------------------------------------
+	//  Block lookup helpers — read from snapshot, no live UObject access
+	// -----------------------------------------------------------------------
+	auto GetBlockFromSnap = [&](int32 X, int32 Y, int32 Z) -> EBlockType
+	{
+		// Own chunk
+		if (X >= 0 && X < CHUNK_SIZE_X &&
+			Y >= 0 && Y < CHUNK_SIZE_Y &&
+			Z >= 0 && Z < CHUNK_SIZE_Z)
+		{
+			if (Snap.bOwnIsUniform) return Snap.OwnUniformType;
+			return Snap.OwnBlocks[X + CHUNK_SIZE_X * (Y + CHUNK_SIZE_Y * Z)];
+		}
+		// Neighbor face slices
+		// [0]=+X(X=0), [1]=-X(X=31), [2]=+Y(Y=0), [3]=-Y(Y=31), [4]=+Z(Z=0), [5]=-Z(Z=31)
+		if (X == -1)           { const auto& F = Snap.NeighborFaces[1]; return F.Num() ? F[Y + CHUNK_SIZE_Y * Z] : EBlockType::Air; }
+		if (X == CHUNK_SIZE_X) { const auto& F = Snap.NeighborFaces[0]; return F.Num() ? F[Y + CHUNK_SIZE_Y * Z] : EBlockType::Air; }
+		if (Y == -1)           { const auto& F = Snap.NeighborFaces[3]; return F.Num() ? F[X + CHUNK_SIZE_X * Z] : EBlockType::Air; }
+		if (Y == CHUNK_SIZE_Y) { const auto& F = Snap.NeighborFaces[2]; return F.Num() ? F[X + CHUNK_SIZE_X * Z] : EBlockType::Air; }
+		if (Z == -1)           { const auto& F = Snap.NeighborFaces[5]; return F.Num() ? F[X + CHUNK_SIZE_X * Y] : EBlockType::Air; }
+		if (Z == CHUNK_SIZE_Z) { const auto& F = Snap.NeighborFaces[4]; return F.Num() ? F[X + CHUNK_SIZE_X * Y] : EBlockType::Air; }
+		return EBlockType::Air;
+	};
+
+	auto IsOpaqueFromSnap = [&](int32 X, int32 Y, int32 Z) -> bool
+	{
+		const EBlockType Type = GetBlockFromSnap(X, Y, Z);
+		if (Type == EBlockType::Air) return false;
+		const FBlockDefinition* Def = Snap.BlockDefs.Find(Type);
+		return Def ? Def->bIsOpaque : true;
+	};
+
 	const int32 Dims[3] = { CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z };
 
-	const bool  bHasWorld = (VoxelWorld != nullptr);
-	const int32 AtlasCols = bHasWorld ? FMath::Max(1, VoxelWorld->GetAtlasCols()) : 1;
+	const int32 AtlasCols = FMath::Max(1, Snap.AtlasCols);
 	const int32 AtlasRows = AtlasCols; // atlas is square (ceil-sqrt packing)
 	const float TileU     = 1.f / static_cast<float>(AtlasCols);
 	const float TileV     = 1.f / static_cast<float>(AtlasRows);
@@ -208,15 +317,16 @@ void AChunk::BuildGreedyMesh(
 	                          float& OutU, float& OutV)
 	{
 		FString TexName;
-		if (bHasWorld)
+		const FBlockDefinition* Def = Snap.BlockDefs.Find(Type);
+		if (Def)
 		{
-			const FBlockDefinition& Def = VoxelWorld->GetBlockDefinition(Type);
-			if      (FaceAxis == 2 && FaceSign > 0) TexName = Def.TextureTop;
-			else if (FaceAxis == 2 && FaceSign < 0) TexName = Def.TextureBottom;
-			else                                    TexName = Def.TextureSide;
-			if (TexName.IsEmpty()) TexName = Def.TextureSide;
+			if      (FaceAxis == 2 && FaceSign > 0) TexName = Def->TextureTop;
+			else if (FaceAxis == 2 && FaceSign < 0) TexName = Def->TextureBottom;
+			else                                    TexName = Def->TextureSide;
+			if (TexName.IsEmpty()) TexName = Def->TextureSide;
 		}
-		const int32 TileIdx = bHasWorld ? VoxelWorld->GetTileIndex(TexName) : 0;
+		const int32* TilePtr = TexName.IsEmpty() ? nullptr : Snap.TileIndexMap.Find(TexName);
+		const int32 TileIdx  = TilePtr ? *TilePtr : 0;
 		OutU = static_cast<float>(TileIdx % AtlasCols) * TileU;
 		OutV = static_cast<float>(TileIdx / AtlasCols) * TileV;
 	};
@@ -250,10 +360,10 @@ void AChunk::BuildGreedyMesh(
 					PosA[d] = s;     PosA[u] = i; PosA[v] = j;
 					PosB[d] = s + 1; PosB[u] = i; PosB[v] = j;
 
-					const EBlockType BlockA = GetBlockWithNeighbors(PosA[0], PosA[1], PosA[2]);
-					const EBlockType BlockB = GetBlockWithNeighbors(PosB[0], PosB[1], PosB[2]);
-					const bool bAOpaque  = IsBlockOpaque(PosA[0], PosA[1], PosA[2]);
-					const bool bBOpaque  = IsBlockOpaque(PosB[0], PosB[1], PosB[2]);
+					const EBlockType BlockA = GetBlockFromSnap(PosA[0], PosA[1], PosA[2]);
+					const EBlockType BlockB = GetBlockFromSnap(PosB[0], PosB[1], PosB[2]);
+					const bool bAOpaque  = IsOpaqueFromSnap(PosA[0], PosA[1], PosA[2]);
+					const bool bBOpaque  = IsOpaqueFromSnap(PosB[0], PosB[1], PosB[2]);
 					const bool bAVisible = (BlockA != EBlockType::Air);
 					const bool bBVisible = (BlockB != EBlockType::Air);
 
@@ -361,13 +471,12 @@ void AChunk::BuildGreedyMesh(
 					OutNormals.Add(Normal);
 					OutNormals.Add(Normal);
 
-// Vertex colors encode atlas tile address and UV info.
-				// Brightness is handled by UE5's native lighting system (normal + directional/sky lights).
-
+					// UVs: tile-space coordinates (0..w, 0..h) so the material can
+					// frac() them for per-block texture repetition on greedy-merged quads.
 					// Vertex colour encodes the atlas tile address:
 					//   R = atlas tile U origin,  G = atlas tile V origin
 					//   B = tile size (1/AtlasCols; atlas is square so same for U and V)
-					//   A = 1.0 (full opacity, brightness handled by UE5 lighting)
+					//   A = 1.0 (full opacity; brightness is handled by UE5 native lighting)
 					// Material formula:  atlasUV = frac(UV0) * VertexColor.b + VertexColor.rg
 					//
 					// Axis orientation:  for each face axis d, u=(d+1)%3 and v=(d+2)%3.
@@ -408,7 +517,7 @@ void AChunk::BuildGreedyMesh(
 							OutUVs.Add(FVector2D(0.f,      0.f      ));  // V3: Y=left,  Z=high
 						}
 
-					const FLinearColor TileColor(AU, AV, TileU, 1.0f);  // A = 1.0 (full opacity)
+						const FLinearColor TileColor(AU, AV, TileU, 1.0f);  // A = 1.0 (brightness handled by UE5 native lighting)
 						OutColors.Add(TileColor);
 						OutColors.Add(TileColor);
 						OutColors.Add(TileColor);

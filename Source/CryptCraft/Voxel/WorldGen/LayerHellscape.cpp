@@ -5,13 +5,12 @@
 #include "LayerBase.h"
 #include "Voxel/Chunk.h"
 
-void FHellscapeLevelGenerator::GenerateChunk(
-	AChunk& Chunk,
+void FHellscapeLevelGenerator::GenerateBlocks(
 	int32 GlobalChunkX,
 	int32 GlobalChunkY,
-	int32 LocalChunkZ)
+	int32 LocalChunkZ,
+	TArray<EBlockType>& OutBlocks)
 {
-	TArray<EBlockType> OutBlocks;
 	OutBlocks.SetNum(CHUNK_SIZE_X * CHUNK_SIZE_Y * CHUNK_SIZE_Z);
 
 	for (int32 X = 0; X < CHUNK_SIZE_X; ++X)
@@ -31,6 +30,15 @@ void FHellscapeLevelGenerator::GenerateChunk(
 	// TODO: Add lava pool generation at lower LocalChunkZ slices
 	// TODO: Add magma ore deposits
 	// TODO: Add fire geyser / hazard structure placement
+}
 
-	Chunk.Initialize(OutBlocks);
+void FHellscapeLevelGenerator::GenerateChunk(
+	AChunk& Chunk,
+	int32 GlobalChunkX,
+	int32 GlobalChunkY,
+	int32 LocalChunkZ)
+{
+	TArray<EBlockType> Blocks;
+	GenerateBlocks(GlobalChunkX, GlobalChunkY, LocalChunkZ, Blocks);
+	Chunk.Initialize(Blocks);
 }
