@@ -57,7 +57,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|World", meta = (EditCondition = "WorldGenType == EWorldGenType::Flat", ClampMin = "1"))
 	int32 FlatSurfaceHeight = 8;
 
-
+	/**
+	 * World generation seed. Used by terrain generation to deterministically
+	 * place features like caverns, worms, and procedural structures.
+	 * Change this value to get a different world layout while keeping the same map.
+	 */
+	UPROPERTY(VisibleAnywhere, Category = "Voxel|World")
+	uint32 WorldSeed = 54321u;
 
 	/**
 	 * Material applied to every chunk section.

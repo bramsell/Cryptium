@@ -81,7 +81,9 @@ void AVoxelWorld::BeginPlay()
 void AVoxelWorld::ConfigureLayerStack()
 {
 	WorldGenManager->RegisterLevel(0, MakeShared<FSurfaceLevelGenerator>());
-	WorldGenManager->RegisterLevel(1, MakeShared<FCrystalCavesLevelGenerator>());
+	auto CrystalCavesGen = MakeShared<FCrystalCavesLevelGenerator>();
+	CrystalCavesGen->SetWorldSeed(WorldSeed);
+	WorldGenManager->RegisterLevel(1, CrystalCavesGen);
 	WorldGenManager->RegisterLevel(2, MakeShared<FPrimordialCavernLevelGenerator>());
 	WorldGenManager->RegisterLevel(3, MakeShared<FHellscapeLevelGenerator>());
 	WorldGenManager->RegisterLevel(4, MakeShared<FFrostbittenLevelGenerator>());

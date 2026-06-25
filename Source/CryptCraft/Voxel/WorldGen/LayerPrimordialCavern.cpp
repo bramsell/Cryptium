@@ -4,8 +4,8 @@
 // Block layout (256 blocks = 8 chunks, LocalChunkZ 0 = shallowest):
 //   LocalChunkZ 0   : Solid stone ceiling                                ( 32 blocks)
 //   LocalChunkZ 1   : Ceiling fringe — Perlin stalactites, up to 32 blocks deep
-//   LocalChunkZ 2–5 : Pure open air void                                 (128 blocks)
-//   LocalChunkZ 6–7 : Land/Water terrain based on 2-octave Perlin        ( 64 blocks)
+//   LocalChunkZ 2–3 : Pure open air void                                 ( 64 blocks)
+//   LocalChunkZ 4–7 : Land/Water terrain based on 2-octave Perlin        (128 blocks)
 
 #include "LayerPrimordialCavern.h"
 #include "LayerBase.h"
@@ -39,7 +39,7 @@ static float SampleContinentNoise(float WX, float WY)
 	static constexpr float NoiseOffset = 50000.5f;
 	float Value = 0.f;
 	float Amp   = 1.f;
-	float Freq  = 1.f / 300.f;
+	float Freq  = 1.f / 3000.f;  // PIECE 1: Enlarged from 1/475 for larger continental scale
 	float Total = 0.f;
 
 	for (int32 Oct = 0; Oct < 3; ++Oct)
@@ -54,28 +54,35 @@ static float SampleContinentNoise(float WX, float WY)
 }
 
 // Spline remap: maps continent noise [-1, 1] to a shaped [0, 1] height fraction.
+// PIECE 2: Ocean side compressed (smaller fraction of input range), land side unchanged.
 // Control points: (input, output)
-//   (-1.0, 0.03) — deep ocean abyss
-//   (-0.4, 0.08) — shallow ocean
-//   (-0.15, 0.45) — continental shelf
-//   ( 0.0,  0.50) — coastline / sea level
-//   ( 0.20, 0.52) — low coastal plain
-//   ( 0.35, 0.55) — end of plains / foothills start
-//   ( 0.50, 0.68) — foothills
-//   ( 0.70, 0.88) — mid hills
-//   ( 1.0,  1.00) — mountain peaks
+//   (-1.0, 0.02)  — deep ocean abyss (unchanged)
+//   (-0.65, 0.04) — shallow ocean (MOVED: was -0.40)
+//   (-0.40, 0.15) — mid ocean (MOVED: was -0.20)
+//   (-0.20, 0.35) — deep shelf (MOVED: was -0.10)
+//   (-0.05, 0.48) — upper shelf (MOVED: was -0.03)
+//   ( 0.0,  0.50) — coastline (unchanged)
+//   ( 0.03, 0.52) — coastal plain (unchanged)
+//   ( 0.12, 0.60) — plains (unchanged)
+//   ( 0.30, 0.72) — foothills (unchanged)
+//   ( 0.50, 0.85) — mid hills (unchanged)
+//   ( 0.75, 0.95) — high hills (unchanged)
+//   ( 1.0,  1.00) — mountain peaks (unchanged)
 static float RemapShapeCurve(float t)
 {
 	struct FControlPoint { float In; float Out; };
 	static constexpr FControlPoint Points[] = {
-		{ -1.00f, 0.03f },
-		{ -0.40f, 0.08f },
-		{ -0.15f, 0.45f },
+		{ -1.00f, 0.02f },
+		{ -0.65f, 0.04f },  // Compressed ocean range
+		{ -0.40f, 0.15f },
+		{ -0.20f, 0.35f },
+		{ -0.05f, 0.48f },
 		{  0.00f, 0.50f },
-		{  0.20f, 0.52f },
-		{  0.35f, 0.55f },
-		{  0.50f, 0.68f },
-		{  0.70f, 0.88f },
+		{  0.03f, 0.52f },
+		{  0.12f, 0.60f },
+		{  0.30f, 0.72f },
+		{  0.50f, 0.85f },
+		{  0.75f, 0.95f },
 		{  1.00f, 1.00f },
 	};
 	static constexpr int32 NumPoints = UE_ARRAY_COUNT(Points);
@@ -117,13 +124,44 @@ static float SampleDetailNoise(float WX, float WY)
 	return Value / Total;  // [-1, 1]
 }
 
+// PIECE 3: High-frequency noise for breaking up coastline with organic detail
+static float SampleCoastJitter(float WX, float WY)
+{
+	static constexpr float NoiseOffset = 60000.5f;
+	float Value = 0.f;
+	float Amp   = 1.f;
+	float Freq  = 1.f / 40.f;  // High frequency for fine coastal variation
+	float Total = 0.f;
+
+	for (int32 Oct = 0; Oct < 2; ++Oct)
+	{
+		Value += CavePerlin2D((WX + NoiseOffset) * Freq, (WY + NoiseOffset) * Freq) * Amp;
+		Total += Amp;
+		Amp  *= 0.5f;
+		Freq *= 2.f;
+	}
+
+	return Value / Total;  // [-1, 1]
+}
+
+// PIECE 4: Low-frequency noise for sparse island clusters in deep ocean
+static float SampleIslandMask(float WX, float WY)
+{
+	static constexpr float NoiseOffset = 80000.5f;
+	static constexpr float Freq = 1.f / 200.f;  // Low frequency for large island clusters
+	
+	float Value = CavePerlin2D((WX + NoiseOffset) * Freq, (WY + NoiseOffset) * Freq);
+	return Value;  // [-1, 1]
+}
+
+
+
 // ---------------------------------------------------------------------------
 //  Zone indices  (LocalChunkZ within the Primordial Cavern layer, 0 = shallowest)
 // ---------------------------------------------------------------------------
 
 // CEILING_SOLID_Z and CEILING_FRINGE_Z are now in LayerBase.h
-static constexpr int32 AIR_VOID_START_Z    = 2;
-static constexpr int32 AIR_VOID_END_Z      = 4;   // 3 chunks of air (LocalChunkZ 2-4)
+
 static constexpr int32 TERRAIN_START_Z     = 5;   // 3 chunks of terrain (LocalChunkZ 5-7)
 static constexpr int32 TERRAIN_END_Z       = 7;
 
@@ -145,12 +183,7 @@ void FPrimordialCavernLevelGenerator::GenerateBlocks(
 		return;
 	}
 
-	// ---- Pure air void middle section --------------------------------
-	if (LocalChunkZ >= AIR_VOID_START_Z && LocalChunkZ <= AIR_VOID_END_Z)
-	{
-		OutBlocks.Init(EBlockType::Air, CHUNK_SIZE_X * CHUNK_SIZE_Y * CHUNK_SIZE_Z);
-		return;
-	}
+
 
 	OutBlocks.SetNum(CHUNK_SIZE_X * CHUNK_SIZE_Y * CHUNK_SIZE_Z);
 
@@ -193,41 +226,66 @@ void FPrimordialCavernLevelGenerator::GenerateBlocks(
 				// 1. Large-scale continent shape
 				const float ContinentNoise = SampleContinentNoise(WX, WY);
 
-				// Debug: track noise range across this chunk to confirm hill inputs are reachable
-				static float DbgMin =  1.f, DbgMax = -1.f;
-				static int32 DbgCount = 0;
-				if (ContinentNoise < DbgMin) DbgMin = ContinentNoise;
-				if (ContinentNoise > DbgMax) DbgMax = ContinentNoise;
-				if (++DbgCount >= 1024)
-				{
-					UE_LOG(LogTemp, Warning, TEXT("[PrimordialCavern] ContinentNoise range over last 1024 columns: min=%.3f  max=%.3f"), DbgMin, DbgMax);
-					DbgMin = 1.f; DbgMax = -1.f; DbgCount = 0;
-				}
+			// 2. Remap through spline control points to get base height fraction
+			float ShapeValue = RemapShapeCurve(ContinentNoise);
 
-				// 2. Remap through spline control points to get base height fraction
-				const float ShapeValue = RemapShapeCurve(ContinentNoise);
-
-				// 3. Detail amplitude varies by terrain zone:
-				//    deep ocean / flat plains = low ripple, hills = more roughness
-				float DetailAmplitude;
-				if (ShapeValue < 0.55f)
-					DetailAmplitude = 0.02f;   // ocean / coastal plains
-				else if (ShapeValue < 0.65f)
-					DetailAmplitude = 0.06f;   // plains / foothills transition
-				else
-					DetailAmplitude = 0.35f;   // hilly / mountain range
-
-				// 4. Blend detail noise in
-				const float DetailNoise  = SampleDetailNoise(WX, WY);  // [-1, 1]
-				const float FinalShape   = FMath::Clamp(ShapeValue + DetailNoise * DetailAmplitude, 0.f, 1.f);
-
-				// 5. Map [0, 1] → world height [32, 95]
-				// Capped at 95 so the grass surface block always lands inside the top terrain chunk (LocalChunkZ 5, Z 64-95).
-				const int32 GroundHeight = FMath::Clamp(32 + FMath::RoundToInt(FinalShape * 63.f), 32, 95);
-				const int32 SEA_LEVEL = 64;
+			// 2.5 PIECE 3: Apply coast jitter — breaks up coastline with organic detail
+			//     Fades in near the threshold, fades out as you move well into land or ocean
+			if (ShapeValue > 0.42f && ShapeValue < 0.58f)  // ±0.08 from 0.50 (coastline)
+			{
+				const float CoastDistance = FMath::Abs(ShapeValue - 0.50f) / 0.08f;  // [0, 1]: 0=at coast, 1=far from coast
+				const float JitterFade = 1.0f - (CoastDistance * CoastDistance);  // Fade^2 for smooth cutoff
+				const float CoastJitter = SampleCoastJitter(WX, WY);  // [-1, 1]
 				
-				// Calculate which block this column is in (LocalChunkZ 6 = 32-63, LocalChunkZ 5 = 64-95)
-				const int32 ChunkBaseZ = (TERRAIN_END_Z - LocalChunkZ) * CHUNK_SIZE_Z;
+				ShapeValue += CoastJitter * 0.12f * JitterFade;  // Jitter amplitude: 0.12, faded by zone proximity
+				ShapeValue = FMath::Clamp(ShapeValue, 0.0f, 1.0f);
+			}
+
+			// 3. Detail amplitude varies by terrain zone with smooth interpolation:
+			//    deep ocean / flat plains = low ripple, hills = more roughness
+			//    Using smooth lerp to avoid hard ridge artifacts at zone boundaries
+			float DetailAmplitude = 0.02f;  // ocean base
+			if (ShapeValue > 0.55f)
+			{
+				// Smooth transition from 0.55 to 0.65: 0.02 → 0.06
+				DetailAmplitude = FMath::Lerp(0.02f, 0.06f, FMath::Clamp((ShapeValue - 0.55f) / 0.10f, 0.f, 1.f));
+			}
+			if (ShapeValue > 0.65f)
+			{
+				// Smooth transition from 0.65 to 0.75: 0.06 → 0.18
+				DetailAmplitude = FMath::Lerp(0.06f, 0.18f, FMath::Clamp((ShapeValue - 0.65f) / 0.10f, 0.f, 1.f));
+			}
+
+				// 4. Blend detail noise in (add-only, no downward drops)
+			const float DetailNoise  = SampleDetailNoise(WX, WY);  // [-1, 1]
+			const float DetailContribution = FMath::Max(0.0f, DetailNoise * DetailAmplitude);  // Only add, never subtract
+			float FinalShape = FMath::Clamp(ShapeValue + DetailContribution, 0.f, 1.f);
+
+			// 5. Map [0, 1] → world height [32, 95]
+			int32 GroundHeight = FMath::Clamp(32 + FMath::RoundToInt(FinalShape * 63.f), 32, 95);
+
+			// 6. PIECE 4: Apply island bump in deep ocean only — adds 5–12 blocks to rare island peaks
+			//    Islands are sparse and isolated, gated to ShapeValue < 0.35 (deep ocean)
+			if (ShapeValue < 0.35f)
+			{
+				const float IslandMask = SampleIslandMask(WX, WY);  // [-1, 1]
+				
+				// High threshold (0.70) ensures islands are rare and clustered
+				if (IslandMask > 0.70f)
+				{
+					// Normalize mask intensity to [0, 1], then scale to bump height [0, 12]
+					const float IslandIntensity = FMath::Clamp((IslandMask - 0.70f) / 0.30f, 0.0f, 1.0f);
+					const int32 IslandBump = FMath::RoundToInt(IslandIntensity * 12.0f);  // CORRECTED: 12.0 (was 8.0)
+					
+					GroundHeight += IslandBump;
+					GroundHeight = FMath::Clamp(GroundHeight, 32, 95);  // Safety clamp
+				}
+			}
+
+			const int32 SEA_LEVEL = 64;
+			
+			// Calculate which block this column is in (LocalChunkZ 7 = 0-31, LocalChunkZ 6 = 32-63, LocalChunkZ 5 = 64-95, LocalChunkZ 4 = 96-127)
+			const int32 ChunkBaseZ = (TERRAIN_END_Z - LocalChunkZ) * CHUNK_SIZE_Z;
 
 				// Fill column with appropriate blocks
 				for (int32 Z = 0; Z < CHUNK_SIZE_Z; ++Z)
@@ -242,8 +300,39 @@ void FPrimordialCavernLevelGenerator::GenerateBlocks(
 					}
 					else if (AbsoluteZ == GroundHeight)
 					{
-						// Ground surface: sand near sea level (beach band), grass elsewhere
-						BlockType = (GroundHeight >= 60 && GroundHeight <= 68) ? EBlockType::Sand : EBlockType::Grass;
+						// Ground surface: dry land vs underwater
+						if (GroundHeight > SEA_LEVEL)
+						{
+						// Dry land: Stone peaks (>85), then probabilistic coastal Sand blend, else Grass
+						if (GroundHeight > 85)
+							BlockType = EBlockType::Stone;
+						else
+						{
+							// Coastal sand blend: continuous jittered proximity to ShapeValue 0.50 threshold
+						// CoastalCloseness = 1.0 at coastline, fades to 0.0 when 0.05+ away in ShapeValue (band ~61-64)
+						const float CoastalCloseness = 1.0f - FMath::Clamp(FMath::Abs(ShapeValue - 0.50f) / 0.05f, 0.0f, 1.0f);
+							const float JitteredCloseness = FMath::Clamp(CoastalCloseness + DetailNoise * 0.25f, 0.0f, 1.0f);
+							
+							// Per-block random value for probabilistic Sand vs Grass
+							const float BlockSalt = CavePerlin2D(WX * 0.15f, WY * 0.15f);
+							const float BlockRandom = BlockSalt * 0.5f + 0.5f;  // [-1, 1] → [0, 1]
+							
+							BlockType = (BlockRandom < JitteredCloseness) ? EBlockType::Sand : EBlockType::Grass;
+						}
+						}
+						else
+						{
+							// Underwater floor: blend Sand → Gravel with depth jitter
+							const float DepthFraction = FMath::Clamp(
+								static_cast<float>(SEA_LEVEL - GroundHeight) / static_cast<float>(SEA_LEVEL - 32),
+								0.f, 1.f);
+							
+							const float JitteredFraction = FMath::Clamp(
+								DepthFraction + DetailNoise * 0.15f,
+								0.f, 1.f);
+							
+							BlockType = (JitteredFraction > 0.5f) ? EBlockType::Gravel : EBlockType::Sand;
+						}
 					}
 					else if (AbsoluteZ <= SEA_LEVEL)
 					{
@@ -260,11 +349,12 @@ void FPrimordialCavernLevelGenerator::GenerateBlocks(
 				}
 			}
 		}
+
 		return;
 	}
 
-	// Fallback (shouldn't happen)
-	OutBlocks.Init(EBlockType::Stone, CHUNK_SIZE_X * CHUNK_SIZE_Y * CHUNK_SIZE_Z);
+	// Fallback (shouldn't happen): fill with air as safe default
+	OutBlocks.Init(EBlockType::Air, CHUNK_SIZE_X * CHUNK_SIZE_Y * CHUNK_SIZE_Z);
 }
 
 void FPrimordialCavernLevelGenerator::GenerateChunk(
