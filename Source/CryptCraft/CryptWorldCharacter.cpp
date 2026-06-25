@@ -26,6 +26,7 @@
 #include "GameFramework/PlayerController.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
+#include "Misc/DateTime.h"
 
 ACryptWorldCharacter::ACryptWorldCharacter()
 {
@@ -851,6 +852,16 @@ void ACryptWorldCharacter::LogTerrainDebugStats()
 	UE_LOG(LogTemp, Warning, TEXT("ShapeValue: %.4f [0, 1] — Threshold: > 0.50 = LAND"), DebugInfo.ShapeValue);
 	UE_LOG(LogTemp, Warning, TEXT("Biome: %s"), *DebugInfo.BiomeName);
 	UE_LOG(LogTemp, Warning, TEXT("Estimated Ground Height: %d blocks"), DebugInfo.EstimatedHeight);
+	
+	// Mountain-specific debug info (populated when biome is Mountains)
+	if (DebugInfo.Biome == EPrimordialBiomeType::PrimordialMountains)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("─── MOUNTAIN DEBUG INFO ───"));
+		UE_LOG(LogTemp, Warning, TEXT("MountainMask: %.4f [0, 1] — Gate/eligibility"), DebugInfo.MountainMask);
+		UE_LOG(LogTemp, Warning, TEXT("PeakNoise: %.4f [0, 1] — Peak detail variation"), DebugInfo.PeakNoise);
+		UE_LOG(LogTemp, Warning, TEXT("HeightBoost: %.1f blocks — Raw mountain boost before blending"), DebugInfo.HeightBoost);
+	}
+	
 	UE_LOG(LogTemp, Warning, TEXT("================================"));
 }
 
@@ -872,8 +883,30 @@ void ACryptWorldCharacter::DebugGridScan()
 	UE_LOG(LogTemp, Warning, TEXT("  ContinentNoise=%.4f ShapeValue=%.4f Biome=%s"), 
 		CenterInfo.ContinentNoise, CenterInfo.ShapeValue, *CenterInfo.BiomeName);
 	
-	UE_LOG(LogTemp, Warning, TEXT("Now running grid scan (20000x20000 blocks at 500-block intervals)..."));
-	FPrimordialCavernLevelGenerator::GridScanForPeaks(BlockX, BlockY, 20000.f, 500.f);
+	// Time the grid scan for performance measurement
+	double ScanStartTime = FPlatformTime::Seconds();
+	
+	UE_LOG(LogTemp, Warning, TEXT("Now running high-resolution grid scan (60000x60000 blocks at 200-block intervals)..."));
+	FPrimordialCavernLevelGenerator::GridScanForPeaks(BlockX, BlockY, 60000.f, 200.f);
+	
+	double ScanEndTime = FPlatformTime::Seconds();
+	double ScanDuration = ScanEndTime - ScanStartTime;
+	
+	UE_LOG(LogTemp, Warning, TEXT("Grid scan completed in %.2f seconds"), ScanDuration);
+}
+
+void ACryptWorldCharacter::DebugMountainMaskRaw()
+{
+	FVector PlayerPos = GetActorLocation();
+	float BlockX = PlayerPos.X / BLOCK_SIZE;
+	float BlockY = PlayerPos.Y / BLOCK_SIZE;
+	
+	UE_LOG(LogTemp, Warning, TEXT("=== MOUNTAINMASK RAW VALUE DEBUG ==="));
+	UE_LOG(LogTemp, Warning, TEXT("Sampler center: BlockX=%.2f BlockY=%.2f"), BlockX, BlockY);
+	UE_LOG(LogTemp, Warning, TEXT(""));
+	
+	// Call the debug utility to sample 20 points and log raw-to-smoothstep mappings
+	FPrimordialCavernLevelGenerator::DebugMountainMaskDistribution(BlockX, BlockY, 10000.f);
 }
 
 

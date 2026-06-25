@@ -64,6 +64,9 @@ public:
 		int32 EstimatedHeight = 0;     // Estimated ground height in blocks
 		EPrimordialBiomeType Biome = EPrimordialBiomeType::Ocean;
 		FString BiomeName;
+		float MountainMask = 0.f;      // Mountain region gate [0, 1] (for mountains only)
+		float PeakNoise = 0.f;         // Peak detail bonus [0, 1] (for mountains only)
+		float HeightBoost = 0.f;       // Final mountain height boost in blocks (for mountains only)
 	};
 
 	/**
@@ -78,4 +81,10 @@ public:
 	 * Logs peaks with coordinates for easy travel/teleport.
 	 */
 	static void GridScanForPeaks(float CenterBlockX, float CenterBlockY, float GridSizeBlocks, float StepBlocks);
+
+	/**
+	 * Debug utility: sample MountainMask raw-to-smoothstep transformation at 20 scattered points.
+	 * Logs both raw Perlin values and final smoothstep outputs to see actual mapping behavior.
+	 */
+	static void DebugMountainMaskDistribution(float CenterBlockX, float CenterBlockY, float GridSizeBlocks);
 };

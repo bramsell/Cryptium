@@ -93,6 +93,11 @@ private:
 	/** Debug exec function: scan for mountain peaks in a 20000x20000 block region. Call from console: DebugGridScan */
 	UFUNCTION(exec)
 	void DebugGridScan();
+
+	/** Debug exec function: sample MountainMask raw Perlin to smoothstep mapping at 20 scattered points. Call from console: DebugMountainMaskRaw */
+	UFUNCTION(exec)
+	void DebugMountainMaskRaw();
+
 	// Loaded at construction from /Game/Input/IMC_Default
 	UPROPERTY()
 	TObjectPtr<UInputMappingContext> DefaultMappingContext;

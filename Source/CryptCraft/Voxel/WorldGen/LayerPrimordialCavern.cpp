@@ -217,15 +217,26 @@ static float SampleLandmarkRarity(float WX, float WY)
 // Mountain region mask — gates where mountains exist via smoothstep.
 // 1-octave at 1/1200 frequency. Returns smoothed [0, 1] where mountains are present.
 // Independent seed from all other noise functions.
-static float SampleMountainMask(float WX, float WY)
+static float SampleMountainMask(float WX, float WY, bool bDebugLog = false)
 {
 	static constexpr float NoiseOffset = 75000.5f;
-	float Freq = 1.f / 1200.f;
+	float Freq = 1.f / 900.f;
 	float Value = CavePerlin2D((WX + NoiseOffset) * Freq, (WY + NoiseOffset) * Freq);
 	
 	// Smoothstep gate: mountains transition in as underlying noise increases
-	float t = FMath::Clamp((Value + 0.2f) / 0.5f, 0.f, 1.f);
-	return t * t * (3.f - 2.f * t);  // Standard smoothstep formula
+	// Increased denominator from 0.5 to 1.0 to desaturate output
+	// Now requires raw noise up to ~0.6 to fully saturate (instead of 0.1)
+	// This spreads MountainMask output across [0,1] range instead of clustering near 1.0
+	float t = FMath::Clamp((Value + 0.4f) / 1.0f, 0.f, 1.f);
+	float Smoothstep = t * t * (3.f - 2.f * t);  // Standard smoothstep formula
+	
+	if (bDebugLog)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("    MountainMask(X=%.1f Y=%.1f): Raw=%.4f -> Clamp=%.4f -> Smoothstep=%.4f"), 
+			WX, WY, Value, t, Smoothstep);
+	}
+	
+	return Smoothstep;
 }
 
 // Peak bonus noise — provides variety within mountains, higher octaves for detailed peaks.
@@ -275,7 +286,8 @@ static float SampleBiomeJitterNoise(float WX, float WY)
 
 static EPrimordialBiomeType DetermineLandBiome(float ShapeValue, float VegetationDensity, float WX, float WY)
 {
-	if (ShapeValue >= 0.78f)
+	// Mountains require BOTH high elevation AND presence in an actual mountain range footprint
+	if (ShapeValue >= 0.78f && SampleMountainMask(WX, WY) > 0.9f)
 	{
 		return EPrimordialBiomeType::PrimordialMountains;
 	}
@@ -352,9 +364,9 @@ EPrimordialBiomeType FPrimordialCavernLevelGenerator::QueryBiomeAtWorldPosition(
 	float ShapeValue = RemapShapeCurve(ContinentNoise);
 	
 	// Apply coast jitter
-	if (ShapeValue > 0.42f && ShapeValue < 0.58f)
+	if (ShapeValue > 0.46f && ShapeValue < 0.54f)
 	{
-		const float CoastDistance = FMath::Abs(ShapeValue - 0.50f) / 0.08f;
+		const float CoastDistance = FMath::Abs(ShapeValue - 0.50f) / 0.04f;
 		const float QuadraticFade = 1.0f - (CoastDistance * CoastDistance);
 		const float CoastJitter = SampleCoastJitter(WorldX, WorldY);
 		
@@ -394,9 +406,9 @@ FPrimordialCavernLevelGenerator::FTerrainDebugInfo FPrimordialCavernLevelGenerat
 	Info.ShapeValue = RemapShapeCurve(Info.ContinentNoise);
 	
 	// Apply coast jitter
-	if (Info.ShapeValue > 0.42f && Info.ShapeValue < 0.58f)
+	if (Info.ShapeValue > 0.46f && Info.ShapeValue < 0.54f)
 	{
-		const float CoastDistance = FMath::Abs(Info.ShapeValue - 0.50f) / 0.08f;
+		const float CoastDistance = FMath::Abs(Info.ShapeValue - 0.50f) / 0.04f;
 		const float QuadraticFade = 1.0f - (CoastDistance * CoastDistance);
 		const float CoastJitter = SampleCoastJitter(BlockX, BlockY);
 		
@@ -423,7 +435,10 @@ FPrimordialCavernLevelGenerator::FTerrainDebugInfo FPrimordialCavernLevelGenerat
 		
 		if (Info.Biome == EPrimordialBiomeType::PrimordialMountains)
 		{
+			Info.MountainMask = SampleMountainMask(BlockX, BlockY);
+			Info.PeakNoise = SamplePeakNoise(BlockX, BlockY);
 			int32 MountainBoost = GenerateMountainHeight(BlockX, BlockY, Info.ShapeValue);
+			Info.HeightBoost = static_cast<float>(MountainBoost);
 			float t = FMath::Clamp((Info.ShapeValue - 0.74f) / 0.08f, 0.f, 1.f);
 			float BlendFactor = t * t * (3.f - 2.f * t);
 			float AdjustedBoost = FMath::Lerp(0.f, static_cast<float>(MountainBoost), BlendFactor);
@@ -447,6 +462,7 @@ void FPrimordialCavernLevelGenerator::GridScanForPeaks(float CenterBlockX, float
 	
 	float HalfSize = GridSizeBlocks * 0.5f;
 	float PeakShapeValue = -1.f;
+	float PeakMountainMask = 0.f;
 	float PeakBlockX = 0.f;
 	float PeakBlockY = 0.f;
 	EPrimordialBiomeType PeakBiome = EPrimordialBiomeType::Ocean;
@@ -455,6 +471,19 @@ void FPrimordialCavernLevelGenerator::GridScanForPeaks(float CenterBlockX, float
 	int32 LandSamples = 0;
 	int32 MountainSamples = 0;
 	
+	// Track ShapeValue bands and MountainMask pass rates
+	int32 Band_060_065 = 0, Band_060_065_Pass = 0;  // [0.60, 0.65)
+	int32 Band_065_070 = 0, Band_065_070_Pass = 0;  // [0.65, 0.70)
+	int32 Band_070_075 = 0, Band_070_075_Pass = 0;  // [0.70, 0.75)
+	int32 Band_075_078 = 0, Band_075_078_Pass = 0;  // [0.75, 0.78)
+	int32 Band_078_Plus = 0, Band_078_Plus_Pass = 0; // [0.78, +∞)
+	int32 Band_060_Plus = 0, Band_060_Plus_Pass = 0; // [0.60, +∞) aggregate
+	
+	// Track MountainMask candidate thresholds for ShapeValue >= 0.78 samples
+	int32 Band_078_Total = 0;
+	int32 Threshold_050 = 0, Threshold_060 = 0, Threshold_070 = 0, Threshold_075 = 0;
+	int32 Threshold_080 = 0, Threshold_085 = 0, Threshold_090 = 0;
+	
 	// Grid scan across area
 	for (float ScanX = CenterBlockX - HalfSize; ScanX <= CenterBlockX + HalfSize; ScanX += StepBlocks)
 	{
@@ -462,6 +491,9 @@ void FPrimordialCavernLevelGenerator::GridScanForPeaks(float CenterBlockX, float
 		{
 			FTerrainDebugInfo DebugInfo = QueryTerrainDebugInfo(ScanX, ScanY);
 			SamplesAnalyzed++;
+			
+			// For all samples at higher elevations, sample MountainMask directly (not biome-dependent)
+			float DirectMountainMask = SampleMountainMask(ScanX, ScanY);
 			
 			if (DebugInfo.ShapeValue > 0.50f)
 			{
@@ -472,10 +504,62 @@ void FPrimordialCavernLevelGenerator::GridScanForPeaks(float CenterBlockX, float
 				}
 			}
 			
+			// Track ShapeValue bands and MountainMask pass rates
+			if (DebugInfo.ShapeValue >= 0.60f)
+			{
+				Band_060_Plus++;
+				
+				// Use direct MountainMask sample to get accurate threshold distribution
+				if (DirectMountainMask > 0.9f)
+				{
+					Band_060_Plus_Pass++;
+				}
+				
+				// Categorize into sub-bands
+				if (DebugInfo.ShapeValue < 0.65f)
+				{
+					Band_060_065++;
+					if (DirectMountainMask > 0.9f) Band_060_065_Pass++;
+				}
+				else if (DebugInfo.ShapeValue < 0.70f)
+				{
+					Band_065_070++;
+					if (DirectMountainMask > 0.9f) Band_065_070_Pass++;
+				}
+				else if (DebugInfo.ShapeValue < 0.75f)
+				{
+					Band_070_075++;
+					if (DirectMountainMask > 0.9f) Band_070_075_Pass++;
+				}
+				else if (DebugInfo.ShapeValue < 0.78f)
+				{
+					Band_075_078++;
+					if (DirectMountainMask > 0.9f) Band_075_078_Pass++;
+				}
+				else
+				{
+					Band_078_Plus++;
+					if (DirectMountainMask > 0.9f) Band_078_Plus_Pass++;
+					
+					// Track candidate thresholds for ShapeValue >= 0.78 samples
+					// Using direct MountainMask sample, not biome-conditional DebugInfo.MountainMask
+					Band_078_Total++;
+					if (DirectMountainMask > 0.50f) Threshold_050++;
+					if (DirectMountainMask > 0.60f) Threshold_060++;
+					if (DirectMountainMask > 0.70f) Threshold_070++;
+					if (DirectMountainMask > 0.75f) Threshold_075++;
+					if (DirectMountainMask > 0.80f) Threshold_080++;
+					if (DirectMountainMask > 0.85f) Threshold_085++;
+					if (DirectMountainMask > 0.90f) Threshold_090++;
+				}
+			}
+			
 			// Track highest ShapeValue (peaks)
+			// Use direct MountainMask to capture the actual value regardless of biome classification
 			if (DebugInfo.ShapeValue > PeakShapeValue)
 			{
 				PeakShapeValue = DebugInfo.ShapeValue;
+				PeakMountainMask = DirectMountainMask;
 				PeakBlockX = ScanX;
 				PeakBlockY = ScanY;
 				PeakBiome = DebugInfo.Biome;
@@ -488,17 +572,54 @@ void FPrimordialCavernLevelGenerator::GridScanForPeaks(float CenterBlockX, float
 	UE_LOG(LogTemp, Warning, TEXT("  Land samples: %d (%.1f%%)"), LandSamples, (LandSamples * 100.f / SamplesAnalyzed));
 	UE_LOG(LogTemp, Warning, TEXT("  Mountain samples: %d (%.1f%%)"), MountainSamples, (MountainSamples * 100.f / SamplesAnalyzed));
 	UE_LOG(LogTemp, Warning, TEXT(""));
+	UE_LOG(LogTemp, Warning, TEXT("SHAPEVALUE BAND BREAKDOWN (MountainMask > 0.9 pass rates):"));
+	UE_LOG(LogTemp, Warning, TEXT("  [0.60, 0.65): %d samples, %d pass (%.1f%%)"), 
+		Band_060_065, Band_060_065_Pass, (Band_060_065 > 0 ? Band_060_065_Pass * 100.f / Band_060_065 : 0.f));
+	UE_LOG(LogTemp, Warning, TEXT("  [0.65, 0.70): %d samples, %d pass (%.1f%%)"), 
+		Band_065_070, Band_065_070_Pass, (Band_065_070 > 0 ? Band_065_070_Pass * 100.f / Band_065_070 : 0.f));
+	UE_LOG(LogTemp, Warning, TEXT("  [0.70, 0.75): %d samples, %d pass (%.1f%%)"), 
+		Band_070_075, Band_070_075_Pass, (Band_070_075 > 0 ? Band_070_075_Pass * 100.f / Band_070_075 : 0.f));
+	UE_LOG(LogTemp, Warning, TEXT("  [0.75, 0.78): %d samples, %d pass (%.1f%%)"), 
+		Band_075_078, Band_075_078_Pass, (Band_075_078 > 0 ? Band_075_078_Pass * 100.f / Band_075_078 : 0.f));
+	UE_LOG(LogTemp, Warning, TEXT("  [0.78, +∞):  %d samples, %d pass (%.1f%%)"), 
+		Band_078_Plus, Band_078_Plus_Pass, (Band_078_Plus > 0 ? Band_078_Plus_Pass * 100.f / Band_078_Plus : 0.f));
+	UE_LOG(LogTemp, Warning, TEXT("  ─────────────────────────────────────────────────────────"));
+	UE_LOG(LogTemp, Warning, TEXT("  [0.60, +∞):  %d samples, %d pass (%.1f%% overall)"), 
+		Band_060_Plus, Band_060_Plus_Pass, (Band_060_Plus > 0 ? Band_060_Plus_Pass * 100.f / Band_060_Plus : 0.f));
+	UE_LOG(LogTemp, Warning, TEXT(""));
+	UE_LOG(LogTemp, Warning, TEXT("MOUNTAINMASK THRESHOLD CANDIDATES (for ShapeValue >= 0.78 only):"));
+	UE_LOG(LogTemp, Warning, TEXT("  Total [0.78, +∞) samples: %d"), Band_078_Total);
+	UE_LOG(LogTemp, Warning, TEXT("  MountainMask > 0.50: %d pass (%.1f%%)"), 
+		Threshold_050, (Band_078_Total > 0 ? Threshold_050 * 100.f / Band_078_Total : 0.f));
+	UE_LOG(LogTemp, Warning, TEXT("  MountainMask > 0.60: %d pass (%.1f%%)"), 
+		Threshold_060, (Band_078_Total > 0 ? Threshold_060 * 100.f / Band_078_Total : 0.f));
+	UE_LOG(LogTemp, Warning, TEXT("  MountainMask > 0.70: %d pass (%.1f%%)"), 
+		Threshold_070, (Band_078_Total > 0 ? Threshold_070 * 100.f / Band_078_Total : 0.f));
+	UE_LOG(LogTemp, Warning, TEXT("  MountainMask > 0.75: %d pass (%.1f%%)"), 
+		Threshold_075, (Band_078_Total > 0 ? Threshold_075 * 100.f / Band_078_Total : 0.f));
+	UE_LOG(LogTemp, Warning, TEXT("  MountainMask > 0.80: %d pass (%.1f%%)"), 
+		Threshold_080, (Band_078_Total > 0 ? Threshold_080 * 100.f / Band_078_Total : 0.f));
+	UE_LOG(LogTemp, Warning, TEXT("  MountainMask > 0.85: %d pass (%.1f%%)"), 
+		Threshold_085, (Band_078_Total > 0 ? Threshold_085 * 100.f / Band_078_Total : 0.f));
+	UE_LOG(LogTemp, Warning, TEXT("  MountainMask > 0.90: %d pass (%.1f%%)"), 
+		Threshold_090, (Band_078_Total > 0 ? Threshold_090 * 100.f / Band_078_Total : 0.f));
+	UE_LOG(LogTemp, Warning, TEXT(""));
 	UE_LOG(LogTemp, Warning, TEXT("HIGHEST PEAK FOUND:"));
 	UE_LOG(LogTemp, Warning, TEXT("  Location: BlockX=%.2f BlockY=%.2f (WorldX=%.2f WorldY=%.2f)"), 
 		PeakBlockX, PeakBlockY, PeakBlockX * BLOCK_SIZE, PeakBlockY * BLOCK_SIZE);
 	UE_LOG(LogTemp, Warning, TEXT("  ShapeValue: %.4f"), PeakShapeValue);
+	UE_LOG(LogTemp, Warning, TEXT("  MountainMask: %.4f"), PeakMountainMask);
 	UE_LOG(LogTemp, Warning, TEXT("  Biome: %s"), *GetBiomeDisplayName(PeakBiome));
 	
-	if (PeakShapeValue >= 0.78f)
+	if (PeakShapeValue >= 0.78f && PeakMountainMask > 0.9f)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("  ✓ MOUNTAINS ELIGIBLE (ShapeValue >= 0.78)"));
+		UE_LOG(LogTemp, Warning, TEXT("  ✓ MOUNTAINS ELIGIBLE (ShapeValue >= 0.78 AND MountainMask > 0.9)"));
 		UE_LOG(LogTemp, Warning, TEXT("  Teleport command: PossessCharacter X=%.2f Y=%.2f Z=-380"), 
 			PeakBlockX * BLOCK_SIZE, PeakBlockY * BLOCK_SIZE);
+	}
+	else if (PeakShapeValue >= 0.78f && PeakMountainMask <= 0.9f)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("  ⚠ High elevation but NO range (ShapeValue >= 0.78 but MountainMask=%.4f <= 0.9)"), PeakMountainMask);
 	}
 	else if (PeakShapeValue > 0.50f)
 	{
@@ -510,6 +631,38 @@ void FPrimordialCavernLevelGenerator::GridScanForPeaks(float CenterBlockX, float
 	}
 	
 	UE_LOG(LogTemp, Warning, TEXT("========================================"));
+}
+
+void FPrimordialCavernLevelGenerator::DebugMountainMaskDistribution(float CenterBlockX, float CenterBlockY, float GridSizeBlocks)
+{
+	UE_LOG(LogTemp, Warning, TEXT("===== MOUNTAINMASK RAW-TO-SMOOTHSTEP DISTRIBUTION ====="));
+	UE_LOG(LogTemp, Warning, TEXT("Center: X=%.0f Y=%.0f | Grid Size: %.0f"), CenterBlockX, CenterBlockY, GridSizeBlocks);
+	UE_LOG(LogTemp, Warning, TEXT(""));
+	UE_LOG(LogTemp, Warning, TEXT("Sampling 20 points scattered across the grid:"));
+	
+	float HalfSize = GridSizeBlocks * 0.5f;
+	
+	// Sample 20 scattered points
+	for (int32 i = 0; i < 20; ++i)
+	{
+		// Spread evenly across grid (roughly 4x5 grid = 20 points)
+		float GridX = (i % 5) * (GridSizeBlocks / 5.f) - HalfSize;
+		float GridY = (i / 5) * (GridSizeBlocks / 4.f) - HalfSize;
+		
+		float SampleX = CenterBlockX + GridX;
+		float SampleY = CenterBlockY + GridY;
+		
+		// Call SampleMountainMask with debug flag enabled
+		float MountainMask = SampleMountainMask(SampleX, SampleY, true);
+		
+		// Also log biome at this location for context
+		EPrimordialBiomeType Biome = QueryBiomeAtWorldPosition(SampleX, SampleY);
+		UE_LOG(LogTemp, Warning, TEXT("  [%d] Biome: %s -> FinalMask: %.4f"), 
+			i, *GetBiomeDisplayName(Biome), MountainMask);
+	}
+	
+	UE_LOG(LogTemp, Warning, TEXT(""));
+	UE_LOG(LogTemp, Warning, TEXT("========== END MOUNTAINMASK DEBUG =========="));
 }
 
 // ---------------------------------------------------------------------------
