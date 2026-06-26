@@ -19,6 +19,10 @@ public:
 	UPROPERTY(BlueprintReadWrite, Category = "Inventory|Drag")
 	bool bFromHotbar = false;
 
+	/** Container type of the source slot (for proper SwapSlots routing) */
+	UPROPERTY(BlueprintReadWrite, Category = "Inventory|Drag")
+	EInventoryContainer SourceContainer = EInventoryContainer::MainGrid;
+
 	/** Index of the source slot */
 	UPROPERTY(BlueprintReadWrite, Category = "Inventory|Drag")
 	int32 FromIndex = -1;

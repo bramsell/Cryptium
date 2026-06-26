@@ -153,6 +153,45 @@ static float CavePerlin2D(float X, float Y)
 	);
 }
 
+static float CavePerlin3D(float X, float Y, float Z)
+{
+	const int32 IX = FMath::FloorToInt(X) & 255;
+	const int32 IY = FMath::FloorToInt(Y) & 255;
+	const int32 IZ = FMath::FloorToInt(Z) & 255;
+	const float FX = X - FMath::FloorToInt(X);
+	const float FY = Y - FMath::FloorToInt(Y);
+	const float FZ = Z - FMath::FloorToInt(Z);
+
+	const float UX = CavePerlinFade(FX);
+	const float UY = CavePerlinFade(FY);
+	const float UZ = CavePerlinFade(FZ);
+
+	const uint8 A = CavePerm[IX    ] + IY;
+	const uint8 B = CavePerm[IX + 1] + IY;
+	const uint8 AA = CavePerm[A    ] + IZ;
+	const uint8 BA = CavePerm[B    ] + IZ;
+	const uint8 AB = CavePerm[A + 1] + IZ;
+	const uint8 BB = CavePerm[B + 1] + IZ;
+
+	float L00 = FMath::Lerp(
+		CavePerlinGrad2(CavePerm[AA    ], FX,       FY      ),
+		CavePerlinGrad2(CavePerm[BA    ], FX - 1.f, FY      ), UX);
+	float L01 = FMath::Lerp(
+		CavePerlinGrad2(CavePerm[AA + 1], FX,       FY      ),
+		CavePerlinGrad2(CavePerm[BA + 1], FX - 1.f, FY      ), UX);
+	float L10 = FMath::Lerp(
+		CavePerlinGrad2(CavePerm[AB    ], FX,       FY - 1.f),
+		CavePerlinGrad2(CavePerm[BB    ], FX - 1.f, FY - 1.f), UX);
+	float L11 = FMath::Lerp(
+		CavePerlinGrad2(CavePerm[AB + 1], FX,       FY - 1.f),
+		CavePerlinGrad2(CavePerm[BB + 1], FX - 1.f, FY - 1.f), UX);
+
+	float L0 = FMath::Lerp(L00, L10, UY);
+	float L1 = FMath::Lerp(L01, L11, UY);
+
+	return FMath::Lerp(L0, L1, UZ);
+}
+
 // ---------------------------------------------------------------------------
 //  Shared zone indices (LocalChunkZ constants for layer generators)
 // ---------------------------------------------------------------------------

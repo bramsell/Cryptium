@@ -1,4 +1,5 @@
 #include "Inventory/InventoryComponent.h"
+#include "Crafting/CraftingSystem.h"
 
 // ---------------------------------------------------------------------------
 //  Construction / Lifecycle
@@ -11,12 +12,10 @@ UInventoryComponent::UInventoryComponent()
     // Pre-allocate all slots so every index is always valid.
     MainGrid.SetNum(GridSize);
     Hotbar.SetNum(HotbarSize);
+    CraftingInputSlots.SetNum(CraftingInputSize);
 
-    // Pre-populate the equipment map with empty slots for every possible slot.
-    for (uint8 i = 0; i < static_cast<uint8>(EEquipmentSlot::Ring8) + 1; ++i)
-    {
-        EquipmentSlots.Add(static_cast<EEquipmentSlot>(i), FInventorySlot());
-    }
+    // Equipment slots will be populated on-demand when items are equipped.
+    // Starting with an empty TMap avoids reflection system issues during destruction.
 }
 
 void UInventoryComponent::BeginPlay()
@@ -29,6 +28,16 @@ void UInventoryComponent::BeginPlay()
             TEXT("UInventoryComponent on '%s': No ItemDataTable assigned – item lookups will fail."),
             *GetOwner()->GetName());
     }
+
+    // Initialize crafting system
+    if (!CraftingSystem)
+    {
+        CraftingSystem = NewObject<UCraftingSystem>(this);
+        if (CraftingSystem)
+        {
+            CraftingSystem->Initialize(this);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -39,11 +48,18 @@ int32 UInventoryComponent::AddItem(FName ItemID, int32 Count)
 {
     if (ItemID.IsNone() || Count <= 0) return Count;
 
+    UE_LOG(LogTemp, Warning, TEXT("[InventoryComponent::AddItem] START: ItemID=%s, Count=%d"), *ItemID.ToString(), Count);
+
     // Determine max stack size from the DataTable (default 64 if not found).
     int32 MaxStack = 64;
     if (FItemData* Data = GetItemData(ItemID))
     {
         MaxStack = FMath::Max(1, Data->MaxStackSize);
+        UE_LOG(LogTemp, Warning, TEXT("[InventoryComponent::AddItem] Found item data, MaxStack=%d"), MaxStack);
+    }
+    else
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[InventoryComponent::AddItem] ItemID not found in DataTable!"));
     }
 
     int32 Remaining = Count;
@@ -74,15 +90,26 @@ int32 UInventoryComponent::AddItem(FName ItemID, int32 Count)
         }
     }
 
+    UE_LOG(LogTemp, Warning, TEXT("[InventoryComponent::AddItem] After Pass 1 (partial stacks): Remaining=%d"), Remaining);
+
     // Pass 2: Fill empty hotbar slots (prioritize hotbar for new stacks).
     Remaining = AddToSlotArray(Hotbar, ItemID, Remaining, MaxStack);
+
+    UE_LOG(LogTemp, Warning, TEXT("[InventoryComponent::AddItem] After Pass 2 (hotbar empties): Remaining=%d"), Remaining);
 
     // Pass 3: Fill empty main grid slots.
     Remaining = AddToSlotArray(MainGrid, ItemID, Remaining, MaxStack);
 
+    UE_LOG(LogTemp, Warning, TEXT("[InventoryComponent::AddItem] After Pass 3 (grid empties): Remaining=%d"), Remaining);
+
     if (Remaining < Count)
     {
+        UE_LOG(LogTemp, Warning, TEXT("[InventoryComponent::AddItem] SUCCESS - NotifyInventoryChanged called. Items added: %d"), Count - Remaining);
         NotifyInventoryChanged();
+    }
+    else
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[InventoryComponent::AddItem] FAILED - No items were added!"));
     }
 
     return Remaining;
@@ -123,40 +150,61 @@ int32 UInventoryComponent::GetItemCount(FName ItemID) const
 //  Slot interaction
 // ---------------------------------------------------------------------------
 
-void UInventoryComponent::SwapSlots(bool bFromHotbar, int32 FromIndex,
-                                     bool bToHotbar,   int32 ToIndex)
+void UInventoryComponent::SwapSlots(EInventoryContainer FromContainer, int32 FromIndex,
+                                     EInventoryContainer ToContainer, int32 ToIndex)
 {
-    TArray<FInventorySlot>& FromArr = bFromHotbar ? Hotbar : MainGrid;
-    TArray<FInventorySlot>& ToArr   = bToHotbar   ? Hotbar : MainGrid;
+    // Helper to get the slot array for a container
+    auto GetSlotArray = [this](EInventoryContainer Container) -> TArray<FInventorySlot>*
+    {
+        switch (Container)
+        {
+            case EInventoryContainer::MainGrid:       return &MainGrid;
+            case EInventoryContainer::Hotbar:         return &Hotbar;
+            case EInventoryContainer::CraftingInput:  return &CraftingInputSlots;
+            case EInventoryContainer::CraftingOutput: return nullptr;  // Single slot, handled specially
+            default:                                  return nullptr;
+        }
+    };
 
-    if (!FromArr.IsValidIndex(FromIndex) || !ToArr.IsValidIndex(ToIndex)) return;
+    // Helper to get a slot from any container (handles single-slot CraftingOutput)
+    auto GetSlot = [this, &GetSlotArray](EInventoryContainer Container, int32 Index) -> FInventorySlot*
+    {
+        if (Container == EInventoryContainer::CraftingOutput)
+        {
+            return Index == 0 ? &CraftingOutputSlot : nullptr;
+        }
+        TArray<FInventorySlot>* Arr = GetSlotArray(Container);
+        return (Arr && Arr->IsValidIndex(Index)) ? &(*Arr)[Index] : nullptr;
+    };
 
-    FInventorySlot& From = FromArr[FromIndex];
-    FInventorySlot& To   = ToArr[ToIndex];
+    FInventorySlot* From = GetSlot(FromContainer, FromIndex);
+    FInventorySlot* To   = GetSlot(ToContainer, ToIndex);
+
+    if (!From || !To) return;
 
     // Merge stacks if same item and destination has room.
-    if (!From.IsEmpty() && !To.IsEmpty() && From.ItemID == To.ItemID)
+    if (!From->IsEmpty() && !To->IsEmpty() && From->ItemID == To->ItemID)
     {
         int32 MaxStack = 64;
-        if (FItemData* Data = GetItemData(From.ItemID))
+        if (FItemData* Data = GetItemData(From->ItemID))
         {
             MaxStack = FMath::Max(1, Data->MaxStackSize);
         }
 
-        const int32 Room = MaxStack - To.StackCount;
+        const int32 Room = MaxStack - To->StackCount;
         if (Room > 0)
         {
-            const int32 Transfer = FMath::Min(Room, From.StackCount);
-            To.StackCount   += Transfer;
-            From.StackCount -= Transfer;
-            if (From.StackCount <= 0) From.Clear();
+            const int32 Transfer = FMath::Min(Room, From->StackCount);
+            To->StackCount   += Transfer;
+            From->StackCount -= Transfer;
+            if (From->StackCount <= 0) From->Clear();
             NotifyInventoryChanged();
             return;
         }
     }
 
     // Otherwise: simple swap.
-    Swap(From, To);
+    Swap(*From, *To);
     NotifyInventoryChanged();
 }
 

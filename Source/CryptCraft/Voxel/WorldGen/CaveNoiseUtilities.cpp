@@ -68,10 +68,10 @@ namespace CaveNoise
 	}
 
 	// -----------------------------------------------------------------------
-	//  1D Perlin Noise
+	//  Internal: Single-Octave 1D Perlin Noise (raw output, -1 to 1)
 	// -----------------------------------------------------------------------
 
-	float SeededNoise1D(uint32 Seed, float X)
+	static float SingleOctaveNoise1D(uint32 Seed, float X)
 	{
 		const int32 IX = FMath::FloorToInt(X);
 		const float FX = X - FMath::FloorToInt(X);
@@ -86,17 +86,40 @@ namespace CaveNoise
 		const float Dot1 = G1 * (FX - 1.0f);
 
 		// Interpolate
-		const float Result = FMath::Lerp(Dot0, Dot1, U);
-
-		// Normalize to [0, 1]
-		return Result * 0.5f + 0.5f;
+		return FMath::Lerp(Dot0, Dot1, U);
 	}
 
 	// -----------------------------------------------------------------------
-	//  2D Perlin Noise
+	//  1D Perlin Noise with Fractal Octaves (fBm)
 	// -----------------------------------------------------------------------
 
-	float SeededNoise2D(uint32 Seed, float X, float Y)
+	float SeededNoise1D(uint32 Seed, float X)
+	{
+		float Total = 0.0f;
+		float Amplitude = 1.0f;
+		float Frequency = 1.0f;
+
+		constexpr int32 Octaves = 4;
+		constexpr float Persistence = 0.5f;
+		constexpr float Lacunarity = 2.0f;
+
+		for (int32 Oct = 0; Oct < Octaves; ++Oct)
+		{
+			Total += SingleOctaveNoise1D(Seed + Oct * 101u, X * Frequency) * Amplitude;
+			Amplitude *= Persistence;
+			Frequency *= Lacunarity;
+		}
+
+		// Raw octave sum is in roughly [-2.0, 2.0] range due to geometry of Perlin gradients
+		// Scale to [-1, 1] then to [0, 1]
+		return FMath::Clamp(Total * 0.25f + 0.5f, 0.0f, 1.0f);
+	}
+
+	// -----------------------------------------------------------------------
+	//  Internal: Single-Octave 2D Perlin Noise (raw output, -1 to 1)
+	// -----------------------------------------------------------------------
+
+	static float SingleOctaveNoise2D(uint32 Seed, float X, float Y)
 	{
 		const int32 IX = FMath::FloorToInt(X);
 		const int32 IY = FMath::FloorToInt(Y);
@@ -121,16 +144,40 @@ namespace CaveNoise
 		// Bilinear interpolation
 		const float LX0 = FMath::Lerp(D00, D10, UX);
 		const float LX1 = FMath::Lerp(D01, D11, UX);
-		const float Result = FMath::Lerp(LX0, LX1, UY);
-
-		return Result * 0.5f + 0.5f;  // Normalize to [0, 1]
+		return FMath::Lerp(LX0, LX1, UY);
 	}
 
 	// -----------------------------------------------------------------------
-	//  3D Perlin Noise
+	//  2D Perlin Noise with Fractal Octaves (fBm)
 	// -----------------------------------------------------------------------
 
-	float SeededNoise3D(uint32 Seed, FVector Pos)
+	float SeededNoise2D(uint32 Seed, float X, float Y)
+	{
+		float Total = 0.0f;
+		float Amplitude = 1.0f;
+		float Frequency = 1.0f;
+
+		constexpr int32 Octaves = 4;
+		constexpr float Persistence = 0.5f;
+		constexpr float Lacunarity = 2.0f;
+
+		for (int32 Oct = 0; Oct < Octaves; ++Oct)
+		{
+			Total += SingleOctaveNoise2D(Seed + Oct * 101u, X * Frequency, Y * Frequency) * Amplitude;
+			Amplitude *= Persistence;
+			Frequency *= Lacunarity;
+		}
+
+		// Raw octave sum is in roughly [-2.0, 2.0] range due to geometry of Perlin gradients
+		// Scale to [-1, 1] then to [0, 1]
+		return FMath::Clamp(Total * 0.25f + 0.5f, 0.0f, 1.0f);
+	}
+
+	// -----------------------------------------------------------------------
+	//  Internal: Single-Octave 3D Perlin Noise (raw output, -1 to 1)
+	// -----------------------------------------------------------------------
+
+	static float SingleOctaveNoise3D(uint32 Seed, FVector Pos)
 	{
 		const int32 IX = FMath::FloorToInt(Pos.X);
 		const int32 IY = FMath::FloorToInt(Pos.Y);
@@ -173,9 +220,33 @@ namespace CaveNoise
 		const float LY0 = FMath::Lerp(LX00, LX10, UY);
 		const float LY1 = FMath::Lerp(LX01, LX11, UY);
 
-		const float Result = FMath::Lerp(LY0, LY1, UZ);
+		return FMath::Lerp(LY0, LY1, UZ);
+	}
 
-		return Result * 0.5f + 0.5f;  // Normalize to [0, 1]
+	// -----------------------------------------------------------------------
+	//  3D Perlin Noise with Fractal Octaves (fBm)
+	// -----------------------------------------------------------------------
+
+	float SeededNoise3D(uint32 Seed, FVector Pos)
+	{
+		float Total = 0.0f;
+		float Amplitude = 1.0f;
+		float Frequency = 1.0f;
+
+		constexpr int32 Octaves = 4;
+		constexpr float Persistence = 0.5f;
+		constexpr float Lacunarity = 2.0f;
+
+		for (int32 Oct = 0; Oct < Octaves; ++Oct)
+		{
+			Total += SingleOctaveNoise3D(Seed + Oct * 101u, Pos * Frequency) * Amplitude;
+			Amplitude *= Persistence;
+			Frequency *= Lacunarity;
+		}
+
+		// Raw octave sum is in roughly [-2.0, 2.0] range due to geometry of Perlin gradients
+		// Scale to [-1, 1] then to [0, 1]
+		return FMath::Clamp(Total * 0.25f + 0.5f, 0.0f, 1.0f);
 	}
 
 	// -----------------------------------------------------------------------

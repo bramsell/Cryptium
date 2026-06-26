@@ -50,6 +50,24 @@ struct FBottomFloorZone
 // Taper zone depth: applies to top and bottom cavern boundaries
 static constexpr int32 TAPER_DEPTH = CHUNK_SIZE_Z;  // 32 blocks per chunk
 
+// ---------------------------------------------------------------------------
+//  BRIDGE/TUNNEL CONFIG - Unified bridge-in-air / tunnel-in-rock system
+//  Set BRIDGES_ENABLED to false to disable entirely with no other changes needed
+// ---------------------------------------------------------------------------
+static constexpr bool BRIDGES_ENABLED = true;
+
+static constexpr float BRIDGE_NOISE_FREQ_XY   = 0.002f;  // horizontal frequency — independent from air/stone region freq
+static constexpr float BRIDGE_NOISE_OFFSET     = 5231.0f; // offset to decorrelate bridge noise from cavern walls
+static constexpr float BRIDGE_THRESHOLD_BASE  = 0.006f;  // base thickness of bridge/tunnel ribbon in XY
+static constexpr float BRIDGE_THRESHOLD_WALL  = 0.030f;  // thickness at wall contact (wider at walls)
+static constexpr float BRIDGE_SLANT_FREQ      = 0.005f;  // frequency of height warping — controls slope rate
+static constexpr float BRIDGE_SLANT_AMPLITUDE = 15.0f;   // max height variation in blocks (±15 blocks)
+static constexpr float BRIDGE_BASE_MID_Z      = 0.5f;    // fraction of layer height for bridge floor (0.5 = middle)
+static constexpr float BRIDGE_WALL_FALLOFF    = 0.04f;   // how quickly bridge narrows away from wall (higher = faster)
+static constexpr float BRIDGE_ARCH_DEPTH      = 3.0f;   // vertical extent of bridge arch below MidZ
+static constexpr float BRIDGE_ARCH_WALL_MULT  = 3.0f;    // arch extends 2x deeper at walls (drooping effect)
+static constexpr float BRIDGE_TUNNEL_HEIGHT   = 8.0f;    // vertical extent of tunnel vault above MidZ
+
 // ===========================================================================
 //  End CONFIG Section
 // ===========================================================================
@@ -65,7 +83,7 @@ static constexpr int32 TAPER_DEPTH = CHUNK_SIZE_Z;  // 32 blocks per chunk
 
 static float Sample2DNoise(int32 X, int32 Z)
 {
-	const float Freq = 1.0f / 256.0f;  // ~100-400 block wide regions
+	const float Freq = 1.5f / 256.0f;  // 50% higher frequency for smaller cavern regions
 	const float NoiseX = static_cast<float>(X) * Freq;
 	const float NoiseZ = static_cast<float>(Z) * Freq;
 	return CavePerlin2D(NoiseX, NoiseZ);  // Returns ~[-1, 1]
@@ -240,6 +258,109 @@ float FCrystalCavesLevelGenerator::SampleUnifiedHeight(int32 X, int32 Z, uint32 
 }
 
 // ---------------------------------------------------------------------------
+//  GenerateBridgeTunnel - Unified bridge-in-air / tunnel-in-rock system
+//
+//  Returns a block override if this voxel is part of a bridge/tunnel,
+//  or EBlockType::MAX as a sentinel meaning "no override, use default logic."
+//
+//  How it works:
+//  - 2D path-finding (XY noise) determines WHERE the bridge/tunnel exists horizontally
+//  - Cosine profile (pure math) determines SHAPE: rounded arch below MidZ, rounded vault above
+//  - In AIR regions:   solid arch below MidZ, tapers to zero at MidZ - BRIDGE_ARCH_DEPTH
+//  - In ROCK regions:  air void above MidZ, tapers to zero at MidZ + BRIDGE_TUNNEL_HEIGHT
+//  - MidZ is warped by low-frequency slanting noise → bridges rise and fall across landscape
+//  - Path thickness is modulated by distance from air/rock boundary → wide at walls, thin in open space
+// ---------------------------------------------------------------------------
+
+static bool GenerateBridgeTunnel(
+	float RegionNoise,
+	float VoxelHeightFromFloor,
+	int32 TotalCavernHeight,
+	int32 WorldX,
+	int32 WorldY,
+	EBlockType SolidBlockType,
+	EBlockType& OutBlockType)
+{
+	if (!BRIDGES_ENABLED)
+	{
+		return false; // bridges disabled, no override
+	}
+
+	// --- Slanting floor height ---
+	// Low-frequency 2D noise makes bridges rise and fall across the landscape
+	float SlantNoise = CavePerlin2D(WorldX * BRIDGE_SLANT_FREQ, WorldY * BRIDGE_SLANT_FREQ);
+	float MidZ = TotalCavernHeight * BRIDGE_BASE_MID_Z + SlantNoise * BRIDGE_SLANT_AMPLITUDE;
+
+	// --- XY path detection (2D noise only) ---
+	// This determines WHERE the bridge/tunnel path exists in the horizontal plane
+	// Use offset to decorrelate from cavern wall noise
+	float PathNoise = CavePerlin2D(
+		WorldX * BRIDGE_NOISE_FREQ_XY + BRIDGE_NOISE_OFFSET,
+		WorldY * BRIDGE_NOISE_FREQ_XY + BRIDGE_NOISE_OFFSET);
+
+	// --- Width modulation: wide at air/rock boundary, thin toward cavern center ---
+	// RegionNoise is near 0 at boundary, larger positive deep in air, larger negative deep in rock
+	float BoundaryDist = FMath::Abs(RegionNoise) * 100.0f; // 0 at boundary, increases away from it
+	float WallProximity = FMath::Exp(-BoundaryDist * BRIDGE_WALL_FALLOFF); // 1.0 at wall, 0 toward center
+
+	// Blend threshold between base (thin, open space) and wall (wide, at contact)
+	float Threshold = FMath::Lerp(BRIDGE_THRESHOLD_BASE, BRIDGE_THRESHOLD_WALL, WallProximity);
+
+	// --- Is this XY position on a bridge/tunnel path? ---
+	bool bOnPath = FMath::Abs(PathNoise) < Threshold;
+	if (!bOnPath)
+	{
+		return false; // not on any bridge/tunnel path, no override
+	}
+
+	// --- Vertical profile: deterministic falloff from MidZ ---
+	float DistFromMid = VoxelHeightFromFloor - MidZ;
+	bool bIsAir = RegionNoise > 0.0f;
+
+	if (bIsAir)
+	{
+		// Bridge deck in air region: solid arch below MidZ
+		if (DistFromMid >= 0.0f)
+		{
+			return false; // above MidZ in air region, no bridge here
+		}
+		
+		// Below MidZ: cosine arch profile tapers from MidZ down to MidZ - LocalArchDepth
+		// Arch extends deeper at walls (WallProximity=1) than in open space (WallProximity=0)
+		float ArchDepthAtWall = BRIDGE_ARCH_DEPTH * BRIDGE_ARCH_WALL_MULT;
+		float LocalArchDepth = BRIDGE_ARCH_DEPTH + (ArchDepthAtWall - BRIDGE_ARCH_DEPTH) * WallProximity;
+		float ArchProfile = FMath::Cos((FMath::Abs(DistFromMid) / LocalArchDepth) * PI * 0.5f);
+		float LocalThreshold = Threshold * ArchProfile;
+		
+		if (FMath::Abs(PathNoise) < LocalThreshold)
+		{
+			OutBlockType = SolidBlockType;
+			return true;
+		}
+	}
+	else
+	{
+		// Tunnel void in rock region: hollow above MidZ
+		if (DistFromMid <= 0.0f)
+		{
+			return false; // below MidZ in rock region, no tunnel here
+		}
+		
+		// Above MidZ: cosine profile tapers from MidZ up to MidZ + BRIDGE_TUNNEL_HEIGHT
+		float TunnelProfile = FMath::Cos((DistFromMid / BRIDGE_TUNNEL_HEIGHT) * PI * 0.5f);
+		float LocalThreshold = Threshold * TunnelProfile;
+		
+		if (FMath::Abs(PathNoise) < LocalThreshold)
+		{
+			OutBlockType = EBlockType::Air;
+			return true;
+		}
+	}
+
+	return false; // on path but outside active vertical zones
+}
+
+// ---------------------------------------------------------------------------
 //  Composite: Cavern Noise Generation
 //  Combines 2D noise (air/stone regions) + height noise (surface slopes)
 //  Parameters: Ceiling and floor chunk indices for surface detection
@@ -291,14 +412,25 @@ EBlockType FCrystalCavesLevelGenerator::GenerateNoise2DCavern(
 		}
 	}
 
+	// --- Bridge/tunnel pass (highest priority, runs before floor/ceiling features) ---
+	const int32 VoxelHeightFromFloor = (FloorChunk - LocalChunkZ) * CHUNK_SIZE_Z + VoxelZ;
+	EBlockType BridgeBlockType = EBlockType::Air;
+	if (GenerateBridgeTunnel(
+		BaseNoise,
+		static_cast<float>(VoxelHeightFromFloor),
+		TotalCavernHeight,
+		X, Z,
+		SolidBlockType,
+		BridgeBlockType))
+	{
+		return BridgeBlockType; // bridge/tunnel overrides everything else
+	}
+
 	// Check if this voxel is in the air region (with height-varying boundary at edges)
 	if (BaseNoise * 100.0f + ZVariation <= 0.0f)
 	{
 		return SolidBlockType;
 	}
-
-	// Height from floor in blocks, regardless of which chunk we're in
-	const int32 VoxelHeightFromFloor = (FloorChunk - LocalChunkZ) * CHUNK_SIZE_Z + VoxelZ;
 
 	float FloorHeight = SampleUnifiedHeight(X, Z, 0);  // Floor uses base seed (no variant)
 	if (VoxelHeightFromFloor <= (int32)FloorHeight)

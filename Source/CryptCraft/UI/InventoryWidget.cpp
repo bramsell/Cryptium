@@ -94,7 +94,7 @@ bool UInventoryWidget::NativeOnDragOver(const FGeometry& InGeometry, const FDrag
             if (SlotRect.ContainsPoint(MousePos))
             {
                 CurrentHoveredSlot = GridSlotWidgets[i];
-                CurrentHoveredIsHotbar = false;
+                CurrentHoveredContainer = EInventoryContainer::MainGrid;
                 CurrentHoveredIndex = i;
                 return true;
             }
@@ -113,10 +113,45 @@ bool UInventoryWidget::NativeOnDragOver(const FGeometry& InGeometry, const FDrag
             if (SlotRect.ContainsPoint(MousePos))
             {
                 CurrentHoveredSlot = HotbarSlotWidgets[i];
-                CurrentHoveredIsHotbar = true;
+                CurrentHoveredContainer = EInventoryContainer::Hotbar;
                 CurrentHoveredIndex = i;
                 return true;
             }
+        }
+    }
+
+    // Check crafting input slots
+    for (int32 i = 0; i < CraftingInputSlots.Num(); ++i)
+    {
+        if (CraftingInputSlots[i])
+        {
+            FVector2D SlotPos = CraftingInputSlots[i]->GetTickSpaceGeometry().GetAbsolutePosition();
+            FVector2D SlotSize = CraftingInputSlots[i]->GetTickSpaceGeometry().GetLocalSize();
+            FSlateRect SlotRect(SlotPos, SlotSize);
+
+            if (SlotRect.ContainsPoint(MousePos))
+            {
+                CurrentHoveredSlot = CraftingInputSlots[i];
+                CurrentHoveredContainer = EInventoryContainer::CraftingInput;
+                CurrentHoveredIndex = i;
+                return true;
+            }
+        }
+    }
+
+    // Check crafting output slot
+    if (CraftingOutputSlot)
+    {
+        FVector2D SlotPos = CraftingOutputSlot->GetTickSpaceGeometry().GetAbsolutePosition();
+        FVector2D SlotSize = CraftingOutputSlot->GetTickSpaceGeometry().GetLocalSize();
+        FSlateRect SlotRect(SlotPos, SlotSize);
+
+        if (SlotRect.ContainsPoint(MousePos))
+        {
+            CurrentHoveredSlot = CraftingOutputSlot;
+            CurrentHoveredContainer = EInventoryContainer::CraftingOutput;
+            CurrentHoveredIndex = 0;  // Single slot
+            return true;
         }
     }
 
@@ -138,9 +173,19 @@ bool UInventoryWidget::NativeOnDrop(const FGeometry& InGeometry, const FDragDrop
         return false;
     }
 
+    UE_LOG(LogTemp, Warning, TEXT("[InventoryWidget::NativeOnDrop] Attempting drop - CurrentHoveredContainer=%d, CurrentHoveredIndex=%d"), 
+        static_cast<int32>(CurrentHoveredContainer), CurrentHoveredIndex);
+
     // If no valid slot was hovered, reject the drop
     if (CurrentHoveredIndex < 0)
     {
+        return false;
+    }
+
+    // Prevent drops TO the crafting output slot (read-only output)
+    if (CurrentHoveredContainer == EInventoryContainer::CraftingOutput)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[InventoryWidget::NativeOnDrop] DROP REJECTED - Crafting output slot is read-only"));
         return false;
     }
 
@@ -154,9 +199,9 @@ bool UInventoryWidget::NativeOnDrop(const FGeometry& InGeometry, const FDragDrop
         }
     }
 
-    // Perform the swap using the hovered slot that NativeOnDragOver tracked
-    InventoryRef->SwapSlots(InventoryOp->bFromHotbar, InventoryOp->FromIndex,
-                             CurrentHoveredIsHotbar, CurrentHoveredIndex);
+    // Perform the swap using the hovered slot's container type that NativeOnDragOver tracked
+    InventoryRef->SwapSlots(InventoryOp->SourceContainer, InventoryOp->FromIndex,
+                             CurrentHoveredContainer, CurrentHoveredIndex);
 
     return true;
 }
@@ -186,6 +231,7 @@ void UInventoryWidget::Init(UInventoryComponent* Inventory)
     BuildGridSlots();
     BuildHotbarSlots();
     BuildEquipmentSlots();
+    BuildCraftingSlots();
     RefreshAll();
 }
 
@@ -219,6 +265,7 @@ void UInventoryWidget::BuildGridSlots()
 
         SlotWidget->SlotIndex = i;
         SlotWidget->bIsHotbarSlot = false;
+        SlotWidget->SlotContainer = EInventoryContainer::MainGrid;
         SlotWidget->InventoryComponent = InventoryRef;
 
         const int32 Col = i % UInventoryComponent::GridWidth;
@@ -268,6 +315,7 @@ void UInventoryWidget::BuildHotbarSlots()
 
         SlotWidget->SlotIndex = i;
         SlotWidget->bIsHotbarSlot = true;
+        SlotWidget->SlotContainer = EInventoryContainer::Hotbar;
         SlotWidget->InventoryComponent = InventoryRef;
 
         if (UHorizontalBoxSlot* BoxSlot = HotbarBox->AddChildToHorizontalBox(SlotWidget))
@@ -364,6 +412,90 @@ void UInventoryWidget::BuildEquipmentSlots()
     }
 }
 
+void UInventoryWidget::BuildCraftingSlots()
+{
+    // 2x2 input grid
+    if (CraftingInputGridPanel)
+    {
+        if (!SlotWidgetClass)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("[InventoryWidget] BuildCraftingSlots — SlotWidgetClass is not set."));
+            return;
+        }
+
+        CraftingInputGridPanel->ClearChildren();
+        CraftingInputSlots.Empty();
+
+        int32 CreatedCount = 0;
+
+        for (int32 i = 0; i < UInventoryComponent::CraftingInputSize; ++i)
+        {
+            UInventorySlotWidget* SlotWidget =
+                CreateWidget<UInventorySlotWidget>(this, SlotWidgetClass);
+            if (!SlotWidget) continue;
+
+            SlotWidget->SlotIndex = i;
+            SlotWidget->bIsHotbarSlot = false;
+            SlotWidget->SlotContainer = EInventoryContainer::CraftingInput;
+            SlotWidget->InventoryComponent = InventoryRef;
+
+            const int32 Col = i % UInventoryComponent::CraftingInputWidth;
+            const int32 Row = i / UInventoryComponent::CraftingInputWidth;
+
+            if (UUniformGridSlot* GridSlot = CraftingInputGridPanel->AddChildToUniformGrid(SlotWidget, Row, Col))
+            {
+                GridSlot->SetHorizontalAlignment(HAlign_Fill);
+                GridSlot->SetVerticalAlignment(VAlign_Fill);
+            }
+
+            CraftingInputSlots.Add(SlotWidget);
+            ++CreatedCount;
+        }
+
+        UE_LOG(LogTemp, Log, TEXT("[InventoryWidget] BuildCraftingSlots — created %d / %d input slots."), CreatedCount, UInventoryComponent::CraftingInputSize);
+        if (GEngine)
+        {
+            GEngine->AddOnScreenDebugMessage(-1, 6.f,
+                CreatedCount == UInventoryComponent::CraftingInputSize ? FColor::Green : FColor::Orange,
+                FString::Printf(TEXT("[InventoryWidget] Crafting input slots: %d / %d"), CreatedCount, UInventoryComponent::CraftingInputSize));
+        }
+    }
+
+    // Single output slot
+    if (CraftingOutputGridPanel)
+    {
+        if (!SlotWidgetClass)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("[InventoryWidget] BuildCraftingSlots (output) — SlotWidgetClass is not set."));
+            return;
+        }
+
+        CraftingOutputGridPanel->ClearChildren();
+
+        CraftingOutputSlot = CreateWidget<UInventorySlotWidget>(this, SlotWidgetClass);
+        if (CraftingOutputSlot)
+        {
+            CraftingOutputSlot->SlotIndex = 0;
+            CraftingOutputSlot->bIsHotbarSlot = false;
+            CraftingOutputSlot->SlotContainer = EInventoryContainer::CraftingOutput;
+            CraftingOutputSlot->InventoryComponent = InventoryRef;
+
+            if (UUniformGridSlot* GridSlot = CraftingOutputGridPanel->AddChildToUniformGrid(CraftingOutputSlot, 0, 0))
+            {
+                GridSlot->SetHorizontalAlignment(HAlign_Fill);
+                GridSlot->SetVerticalAlignment(VAlign_Fill);
+            }
+
+            UE_LOG(LogTemp, Log, TEXT("[InventoryWidget] BuildCraftingSlots — created output slot."));
+            if (GEngine)
+            {
+                GEngine->AddOnScreenDebugMessage(-1, 6.f, FColor::Green,
+                    TEXT("[InventoryWidget] Crafting output slot: created"));
+            }
+        }
+    }
+}
+
 void UInventoryWidget::ApplyTopHalfView()
 {
     if (!TopHalfSwitcher)
@@ -402,6 +534,7 @@ void UInventoryWidget::RefreshAll()
     RefreshGrid();
     RefreshHotbarSection();
     RefreshEquipment();
+    RefreshCrafting();
 }
 
 void UInventoryWidget::RefreshGrid()
@@ -454,6 +587,29 @@ void UInventoryWidget::RefreshEquipment()
         {
             SlotWidget->RefreshSlot(FInventorySlot(), nullptr);
         }
+    }
+}
+
+void UInventoryWidget::RefreshCrafting()
+{
+    if (!InventoryRef) return;
+
+    // Refresh crafting input slots
+    for (int32 i = 0; i < CraftingInputSlots.Num(); ++i)
+    {
+        UInventorySlotWidget* SlotWidget = CraftingInputSlots[i];
+        if (!SlotWidget) continue;
+
+        const FInventorySlot& SlotData = InventoryRef->CraftingInputSlots[i];
+        FItemData* Data = InventoryRef->GetItemData(SlotData.ItemID);
+        SlotWidget->RefreshSlot(SlotData, Data);
+    }
+
+    // Refresh crafting output slot
+    if (CraftingOutputSlot)
+    {
+        FItemData* Data = InventoryRef->GetItemData(InventoryRef->CraftingOutputSlot.ItemID);
+        CraftingOutputSlot->RefreshSlot(InventoryRef->CraftingOutputSlot, Data);
     }
 }
 

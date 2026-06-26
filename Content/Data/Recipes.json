@@ -1,0 +1,19 @@
+{
+  "recipes": [
+    {
+      "id": "stone_block",
+      "name": "Stone Block",
+      "type": "Crafting",
+      "inputs": [
+        {"slot": 0, "itemId": "dirt", "quantity": 1},
+        {"slot": 1, "itemId": "dirt", "quantity": 1},
+        {"slot": 2, "itemId": "dirt", "quantity": 1},
+        {"slot": 3, "itemId": "dirt", "quantity": 1}
+      ],
+      "outputs": [
+        {"itemId": "stone", "quantity": 1}
+      ],
+      "craftingTimeSeconds": 1.0
+    }
+  ]
+}

@@ -651,9 +651,13 @@ Source/CryptCraft/
 │       ├── LayerHellscape.h / .cpp   [FHellscapeLevelGenerator — placeholder]
 │       └── LayerFrostbitten.h / .cpp [FFrostbittenLevelGenerator — placeholder]
 ├── Inventory/
-│   └── InventoryComponent.h / .cpp  [Player inventory: grid, hotbar, equipment]
+│   └── InventoryComponent.h / .cpp  [Player inventory: grid, hotbar, equipment, crafting]
+├── Crafting/
+│   ├── RecipeManager.h / .cpp        [Loads recipes.json, signature-based matching]
+│   └── CraftingSystem.h / .cpp       [Validates inputs, produces outputs]
 ├── Items/
 │   ├── ItemData.h                    [FItemData DataTable row, EEquipmentSlot enum]
+│   ├── RecipeData.h                  [FRecipeData, FRecipeInput, FRecipeOutput]
 │   └── ItemPickup.h / .cpp          [World drop actor]
 └── UI/
     ├── HotbarWidget.h / .cpp         [Persistent 10-slot hotbar (WBP_Hotbar)]
@@ -665,6 +669,125 @@ Source/CryptCraft/
 
 ---
 
+## Crafting System
+
+### **Items/RecipeData.h**
+**Purpose:** Data structures for recipe definitions (JSON-serializable).
+
+**Key Structs:**
+- `FRecipeInput` — Per-slot requirement: `ItemID` (FName) + `Quantity` (int32)
+- `FRecipeOutput` — Result item: `ItemID` + `Quantity`
+- `FRecipeData` — Full recipe (FTableRowBase for editor):
+  - `RecipeName` — Display name
+  - `RecipeType` — ERecipeType::Crafting or Smelting
+  - `Inputs` — TArray of FRecipeInput (up to 4 for 2×2 grid)
+  - `Outputs` — TArray of FRecipeOutput
+  - `CraftingTimeSeconds` — Duration (for smelting systems)
+  - `RecipeIcon` — Optional texture override
+- `ERecipeType` — Enum: Crafting, Smelting
+
+---
+
+### **Crafting/RecipeManager.h / .cpp**
+**Purpose:** Loads recipes from JSON, builds signature-based lookup map for O(1) recipe matching.
+
+**Key Methods:**
+- `LoadRecipesFromJSON()` — Parses `Content/Data/Recipes.json`; builds AllRecipes map and SignatureToRecipeID map
+- `FindRecipeByInputs(TArray<FInventorySlot>&)` — Computes normalized signature, looks up recipe
+- `GetRecipeByID(FName)` — Direct recipe lookup by row ID
+- `ComputeSignature(...)` — Creates canonical signature (handles shaped/shapeless variants)
+- `NormalizeInputs(...)` — Shifts items to top-left corner for position-independent matching
+
+**Signature System:**
+- **Shaped recipes:** Serialize grid positions (e.g., "dirt,dirt,dirt,dirt" for 2×2)
+- **Shapeless recipes:** Sort item IDs before serializing (order-independent)
+- **Normalization:** Finds bounding box of non-empty slots, shifts to [0,1,2,3] top-left corner
+- **Result:** Recipes match regardless of where items are placed in the grid (Minecraft-like behavior)
+
+**Storage:**
+- `AllRecipes` — TMap<RecipeID, FRecipeData> — all loaded recipes
+- `SignatureToRecipeID` — TMap<Signature, RecipeID> — fast lookup
+
+---
+
+### **Crafting/CraftingSystem.h / .cpp**
+**Purpose:** Watches inventory changes, validates crafting inputs against recipes, auto-produces outputs.
+
+**Key Methods:**
+- `Initialize(UInventoryComponent*)` — Loads recipes, wires OnInventoryChanged delegate
+- `ValidateCraftingInputs()` — Checks if current inputs match a recipe; updates output slot
+- `ExecuteCraft()` — Consumes inputs (decrement by 1), triggers re-validation (output updates)
+- `GetCurrentRecipe()` — Returns pointer to matching recipe (C++-only, not Blueprint)
+- `HasValidRecipe()` — Returns bool for Blueprint
+
+**Lifecycle:**
+- Created in `InventoryComponent::BeginPlay()` as owned UObject
+- Automatically initialized with the player's inventory component
+- Listens to `OnInventoryChanged` and re-validates on every change
+- Updates output slot immediately when recipe matches/mismatches
+
+**State Management:**
+- `CurrentMatchingRecipe` — Pointer to matching recipe (nullptr if no match)
+- `bUpdatingOutput` — Flag to prevent re-validation loops during output updates
+
+---
+
+### **Content/Data/Recipes.json**
+**Purpose:** JSON file defining all crafting recipes.
+
+**Structure:**
+```json
+{
+  "recipes": [
+    {
+      "id": "stone_block",
+      "name": "Stone Block",
+      "type": "Crafting",
+      "inputs": [
+        {"slot": 0, "itemId": "dirt", "quantity": 1},
+        {"slot": 1, "itemId": "dirt", "quantity": 1},
+        {"slot": 2, "itemId": "dirt", "quantity": 1},
+        {"slot": 3, "itemId": "dirt", "quantity": 1}
+      ],
+      "outputs": [
+        {"itemId": "stone", "quantity": 1}
+      ],
+      "craftingTimeSeconds": 1.0
+    }
+  ]
+}
+```
+
+**Fields:**
+- `id` — Unique recipe identifier (string key)
+- `name` — Display name for UI
+- `type` — "Crafting" or "Smelting"
+- `inputs` — Array of {slot (0-3), itemId, quantity}
+- `outputs` — Array of {itemId, quantity}
+- `craftingTimeSeconds` — Duration for multi-step crafts
+
+---
+
+### **Inventory System Integration**
+**Crafting Containers (in InventoryComponent):**
+- `EInventoryContainer::CraftingInput` — 4-slot 2×2 grid for recipe inputs
+- `EInventoryContainer::CraftingOutput` — 1-slot for recipe result (read-only)
+
+**Input Changes Trigger:**
+1. `OnInventoryChanged` broadcast
+2. `CraftingSystem::OnInventoryChanged()` callback fires
+3. `ValidateCraftingInputs()` runs
+4. Recipe signature computed and matched against map
+5. If match: output slot populated with result
+6. If no match: output slot cleared
+
+**Output Slot Behavior:**
+- Read-only (drops rejected in `InventorySlotWidget::NativeOnDragOver` and `NativeOnDrop`)
+- Items can be dragged FROM output to inventory
+- Clears immediately when inputs stop matching recipe
+
+---
+
 ## For Future Developers
 
 - **Coordinate System:** X = East, Y = North, Z = Up. Blocks stored as linear array: `index = X + SizeX * (Y + SizeY * Z)`
@@ -672,3 +795,11 @@ Source/CryptCraft/
 - **Material UVs:** Non-standard; check `Chunk.cpp:BuildGreedyMesh()` for encoding scheme
 - **Streaming:** Player position queried every 0.5s; use `UpdateStreamingPosition()` for immediate refresh
 - **Collision:** Both sync and async paths tested; verify physics bodies on new generation modes
+
+### Crafting System Notes
+- **Recipe Matching:** O(1) via signature map; no iteration through recipe list
+- **Position Independence:** Bounding box normalization means recipes match regardless of slot placement
+- **Recipe Changes:** Add new entries to `Recipes.json` and reload; no code changes needed
+- **Shapeless Recipes:** Set `"type": "Crafting"` and sort ItemIDs in signature; exact mechanism TBD
+- **Multi-Output:** Currently assumes first output only; expand `ApplyRecipeOutput()` for multi-item results
+- **Smelting:** Time-based system not yet implemented; infrastructure in place

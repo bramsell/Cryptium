@@ -91,6 +91,14 @@ protected:
     UPROPERTY(meta = (BindWidgetOptional))
     TObjectPtr<UVerticalBox> SecondaryEquipmentBox;
 
+    /** 2×2 grid for crafting input slots (optional). */
+    UPROPERTY(meta = (BindWidgetOptional))
+    TObjectPtr<UUniformGridPanel> CraftingInputGridPanel;
+
+    /** Single slot for crafting output (optional). */
+    UPROPERTY(meta = (BindWidgetOptional))
+    TObjectPtr<UUniformGridPanel> CraftingOutputGridPanel;
+
     virtual void NativeConstruct() override;
     virtual void NativeDestruct()  override;
     virtual bool NativeOnDragOver(const FGeometry& InGeometry, const FDragDropEvent& InDragDropEvent, UDragDropOperation* InOperation) override;
@@ -110,15 +118,22 @@ private:
     UPROPERTY()
     TMap<EEquipmentSlot, TObjectPtr<UInventorySlotWidget>> EquipSlotWidgets;
 
+    UPROPERTY()
+    TArray<TObjectPtr<UInventorySlotWidget>> CraftingInputSlots;
+
+    UPROPERTY()
+    TObjectPtr<UInventorySlotWidget> CraftingOutputSlot;
+
     // Track which slot is currently being hovered for drop
     TObjectPtr<UInventorySlotWidget> CurrentHoveredSlot;
-    bool CurrentHoveredIsHotbar = false;
+    EInventoryContainer CurrentHoveredContainer = EInventoryContainer::MainGrid;
     int32 CurrentHoveredIndex = -1;
 
     // Build helpers (run once)
     void BuildGridSlots();
     void BuildHotbarSlots();
     void BuildEquipmentSlots();
+    void BuildCraftingSlots();
     void ApplyTopHalfView();
 
     /** Returns true for the always-visible armor quartet. */
@@ -131,6 +146,7 @@ private:
     void RefreshGrid();
     void RefreshHotbarSection();
     void RefreshEquipment();
+    void RefreshCrafting();
 
     // Delegate handlers
     UFUNCTION() void HandleInventoryChanged();

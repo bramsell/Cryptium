@@ -5,6 +5,8 @@
 #include "Items/ItemData.h"
 #include "InventoryComponent.generated.h"
 
+class UCraftingSystem;
+
 // ---------------------------------------------------------------------------
 //  A single inventory slot — an item ID + how many are stacked
 // ---------------------------------------------------------------------------
@@ -27,6 +29,19 @@ struct CRYPTCRAFT_API FInventorySlot
 };
 
 // ---------------------------------------------------------------------------
+//  Inventory container types
+// ---------------------------------------------------------------------------
+
+UENUM(BlueprintType)
+enum class EInventoryContainer : uint8
+{
+    MainGrid       UMETA(DisplayName = "Main Grid"),
+    Hotbar         UMETA(DisplayName = "Hotbar"),
+    CraftingInput  UMETA(DisplayName = "Crafting Input"),
+    CraftingOutput UMETA(DisplayName = "Crafting Output"),
+};
+
+// ---------------------------------------------------------------------------
 //  UInventoryComponent
 //
 //  Attach to the player character (or any Actor that carries items).
@@ -34,6 +49,8 @@ struct CRYPTCRAFT_API FInventorySlot
 //    - MainGrid  : 10 × 5 = 50 slots  (general storage)
 //    - Hotbar    : 10 slots             (quick-access bar)
 //    - Equipment : one slot per EEquipmentSlot value
+//    - CraftingInput : 2 × 2 = 4 slots (recipe inputs)
+//    - CraftingOutput : 1 slot         (recipe result)
 //
 //  Item definitions are looked up at runtime via a UDataTable whose row
 //  type is FItemData.  Assign it in the component's details panel or via BP.
@@ -53,6 +70,11 @@ public:
     static constexpr int32 GridHeight = 5;
     static constexpr int32 GridSize   = GridWidth * GridHeight;  // 50
     static constexpr int32 HotbarSize = 10;
+
+    static constexpr int32 CraftingInputWidth  = 2;
+    static constexpr int32 CraftingInputHeight = 2;
+    static constexpr int32 CraftingInputSize   = CraftingInputWidth * CraftingInputHeight;  // 4
+    static constexpr int32 CraftingOutputSize  = 1;
 
     // -----------------------------------------------------------------------
     //  Construction
@@ -82,6 +104,14 @@ public:
     /** Equipment slots keyed by their logical slot type. */
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Inventory|Equipment")
     TMap<EEquipmentSlot, FInventorySlot> EquipmentSlots;
+
+    /** 4-slot crafting input grid (2×2). */
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Inventory|Crafting")
+    TArray<FInventorySlot> CraftingInputSlots;
+
+    /** Single slot for crafting output. */
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Inventory|Crafting")
+    FInventorySlot CraftingOutputSlot;
 
     /** Currently selected hotbar index (0-based). */
     UPROPERTY(VisibleAnywhere, BlueprintReadWrite, Category = "Inventory|Hotbar")
@@ -139,11 +169,12 @@ public:
     // -----------------------------------------------------------------------
 
     /**
-     * Swap (or merge stacks in) two slots.
-     * bFromHotbar / bToHotbar select whether the index refers to grid or hotbar.
+     * Swap (or merge stacks in) two slots across any inventory containers.
+     * Container types: MainGrid, Hotbar, CraftingInput, CraftingOutput.
      */
     UFUNCTION(BlueprintCallable, Category = "Inventory")
-    void SwapSlots(bool bFromHotbar, int32 FromIndex, bool bToHotbar, int32 ToIndex);
+    void SwapSlots(EInventoryContainer FromContainer, int32 FromIndex,
+                   EInventoryContainer ToContainer, int32 ToIndex);
 
     /**
      * Split a stack – move half (round-down) from the source slot into the
@@ -205,8 +236,15 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Inventory")
     void ClearAll();
 
+    /** Broadcast OnInventoryChanged. */
+    void NotifyInventoryChanged();
+
 protected:
     virtual void BeginPlay() override;
+
+    /** Crafting system instance (auto-created during initialization). */
+    UPROPERTY()
+    TObjectPtr<UCraftingSystem> CraftingSystem;
 
 private:
     /** Internal helper: add as many items as possible from Count into Slots. */
@@ -215,7 +253,4 @@ private:
 
     /** Internal helper: remove up to Count items from Slots. Returns remainder. */
     int32 RemoveFromSlotArray(TArray<FInventorySlot>& Slots, FName ItemID, int32 Count);
-
-    /** Broadcast OnInventoryChanged. */
-    void NotifyInventoryChanged();
 };

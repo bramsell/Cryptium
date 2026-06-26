@@ -106,6 +106,7 @@ void UInventorySlotWidget::NativeOnDragDetected(const FGeometry& InGeometry, con
     if (!DragOp) return;
 
     DragOp->bFromHotbar = bIsHotbarSlot;
+    DragOp->SourceContainer = SlotContainer;
     DragOp->FromIndex = SlotIndex;
     DragOp->ItemID = CachedSlotData.ItemID;
     DragOp->Count = CachedSlotData.StackCount;
@@ -149,6 +150,14 @@ bool UInventorySlotWidget::NativeOnDragOver(const FGeometry& InGeometry, const F
     UInventoryDragDropOperation* InventoryOp = Cast<UInventoryDragDropOperation>(InOperation);
     if (InventoryOp)
     {
+        // Prevent drops TO the crafting output slot (read-only output)
+        // Items can be dragged FROM it, just not TO it
+        if (SlotContainer == EInventoryContainer::CraftingOutput)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("[InventorySlotWidget::NativeOnDragOver] CraftingOutput slot - rejecting drag over"));
+            return false;
+        }
+
         // Signal that this slot can accept the drop
         return true;
     }
@@ -171,6 +180,13 @@ bool UInventorySlotWidget::NativeOnDrop(const FGeometry& InGeometry, const FDrag
         return false;
     }
 
+    // Prevent drops TO the crafting output slot (read-only output)
+    if (SlotContainer == EInventoryContainer::CraftingOutput)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[InventorySlotWidget::NativeOnDrop] DROP REJECTED - Crafting output slot is read-only"));
+        return false;
+    }
+
     // Restore visibility of source slot
     if (InventoryOp->SourceSlotWidget.IsValid())
     {
@@ -182,8 +198,10 @@ bool UInventorySlotWidget::NativeOnDrop(const FGeometry& InGeometry, const FDrag
     }
 
     // Perform the swap
-    InventoryComponent->SwapSlots(InventoryOp->bFromHotbar, InventoryOp->FromIndex,
-                                   bIsHotbarSlot, SlotIndex);
+    EInventoryContainer ToContainer = SlotContainer;
+    
+    InventoryComponent->SwapSlots(InventoryOp->SourceContainer, InventoryOp->FromIndex,
+                                   ToContainer, SlotIndex);
 
     return true;
 }

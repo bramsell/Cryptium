@@ -45,6 +45,10 @@ public:
     UPROPERTY(BlueprintReadWrite, Category = "Inventory|UI")
     bool bIsHotbarSlot = false;
 
+    /** Container type this slot belongs to (set by parent when building slots). */
+    UPROPERTY(BlueprintReadWrite, Category = "Inventory|UI")
+    EInventoryContainer SlotContainer = EInventoryContainer::MainGrid;
+
     /** Reference to the inventory component for drag-drop operations. */
     UPROPERTY(BlueprintReadWrite, Category = "Inventory|UI")
     TObjectPtr<UInventoryComponent> InventoryComponent;

@@ -1001,6 +1001,8 @@ void AItemPickup::OnSphereBeginOverlap(
     }
 
     const int32 Leftover = Inventory->AddItem(ItemID, Quantity);
+    UE_LOG(LogTemp, Warning, TEXT("[ItemPickup] AddItem returned Leftover=%d, Quantity=%d, ItemID=%s"), Leftover, Quantity, *ItemID.ToString());
+    
     if (Leftover <= 0)
     {
         Destroy();

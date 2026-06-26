@@ -21,7 +21,9 @@ public class CryptCraft : ModuleRules
 			"UMG",
 			"Slate",
 			"SlateCore",
-			"ProceduralMeshComponent"
+			"ProceduralMeshComponent",
+			"Json",
+			"JsonUtilities"
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[] { });
