@@ -117,7 +117,7 @@ private:
 
 	/** Max forward/backward speed (units per second). */
 	UPROPERTY(EditAnywhere, Category = "Ship|Piloting")
-	float MaxForwardSpeed = 500.0f;
+	float MaxForwardSpeed = 5000.0f;
 
 	/** Current vertical movement input (-1 to +1). */
 	float CurrentVerticalInput = 0.0f;
